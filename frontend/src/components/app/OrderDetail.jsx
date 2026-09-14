@@ -401,6 +401,7 @@ function InvoiceTab({ order, call, busy, user, openEmail }) {
           <div className="version-badge">{i.invoice_number}</div>
           <div><b>{money(i.total)}</b><small>Due {i.due_date} · {i.payment_terms}</small></div>
           <StatusBadge>{i.status}</StatusBadge>
+          {i.pdf_document_id && <a className="text-btn" href={downloadDocument(i.pdf_document_id)} target="_blank" rel="noreferrer" data-testid={`invoice-pdf-${i.invoice_id}`}><Download size={14} /> PDF</a>}
         </div>
       ))}
       {canAct && order.delivery_status === "Delivered" && (order.invoices || []).length === 0 && (

@@ -14,9 +14,16 @@ import Payments from "./components/app/Payments";
 import Reports from "./components/app/Reports";
 import UsersRoles from "./components/app/UsersRoles";
 import Settings from "./components/app/Settings";
+import ApprovalPage from "./components/app/ApprovalPage";
 import "@/App.css";
 
 export default function App() {
+  const publicMatch = window.location.pathname.match(/^\/approve\/(.+)$/);
+  if (publicMatch) return (<><ApprovalPage token={publicMatch[1]} /><Toaster richColors position="top-right" /></>);
+  return <AppInner />;
+}
+
+function AppInner() {
   const [user, setUser] = useState(null);
   const [checking, setChecking] = useState(true);
   const [page, setPage] = useState("Dashboard");

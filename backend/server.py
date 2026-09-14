@@ -7,12 +7,17 @@ import logging
 import secrets
 import asyncio
 import base64
+from io import BytesIO
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
 import bcrypt
 import jwt
 import resend
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib import colors
+from reportlab.pdfgen import canvas as pdfcanvas
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -35,6 +40,130 @@ STAGES = ["Order Received", "Design", "Client Approval", "Production", "Dispatch
 
 resend.api_key = os.environ.get("RESEND_API_KEY", "")
 SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "info@ashokatechnovations.com")
+
+def frontend_url(request=None):
+    env_url = os.environ.get("FRONTEND_URL")
+    if env_url:
+        return env_url.rstrip("/")
+    if request is not None:
+        origin = request.headers.get("origin")
+        if origin:
+            return origin.rstrip("/")
+        host = request.headers.get("host")
+        if host:
+            return f"https://{host}".rstrip("/")
+    return ""
+
+def sign_approval_token(design_id, order_id):
+    return jwt.encode(
+        {"sub": design_id, "order_id": order_id, "type": "approval_link",
+         "exp": datetime.now(timezone.utc) + timedelta(days=14)},
+        secret(), algorithm=JWT_ALGORITHM,
+    )
+
+def verify_approval_token(token):
+    payload = jwt.decode(token, secret(), algorithms=[JWT_ALGORITHM])
+    if payload.get("type") != "approval_link":
+        raise jwt.InvalidTokenError("Not an approval link")
+    return payload
+
+def rupees(n):
+    return f"Rs. {float(n or 0):,.2f}"
+
+def generate_invoice_pdf(order, invoice, client):
+    buf = BytesIO()
+    c = pdfcanvas.Canvas(buf, pagesize=A4)
+    W, H = A4
+    # header band
+    c.setFillColor(colors.HexColor("#0f172a"))
+    c.rect(0, H - 30 * mm, W, 30 * mm, stroke=0, fill=1)
+    c.setFillColor(colors.HexColor("#93c5fd"))
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(20 * mm, H - 12 * mm, "PINAKI SOLUTIONS")
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 22)
+    c.drawString(20 * mm, H - 22 * mm, "Tax Invoice")
+    c.setFillColor(colors.HexColor("#cbd5e1"))
+    c.setFont("Helvetica", 9)
+    c.drawRightString(W - 20 * mm, H - 16 * mm, f"Invoice #: {invoice['invoice_number']}")
+    c.drawRightString(W - 20 * mm, H - 22 * mm, f"Date: {invoice['invoice_date']}")
+
+    y = H - 45 * mm
+    c.setFillColor(colors.HexColor("#64748b"))
+    c.setFont("Helvetica", 8)
+    c.drawString(20 * mm, y, "BILL FROM")
+    c.drawString(110 * mm, y, "BILL TO")
+    c.setFillColor(colors.HexColor("#0f172a"))
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(20 * mm, y - 6 * mm, "Pinaki Solutions Pvt. Ltd.")
+    c.drawString(110 * mm, y - 6 * mm, order.get("client_name", ""))
+    c.setFont("Helvetica", 9)
+    c.setFillColor(colors.HexColor("#334155"))
+    c.drawString(20 * mm, y - 12 * mm, "info@ashokatechnovations.com")
+    c.drawString(20 * mm, y - 17 * mm, "GSTIN: 27AAECP1234N1ZQ")
+    if client:
+        c.drawString(110 * mm, y - 12 * mm, (client.get("billing_address") or "")[:60])
+        c.drawString(110 * mm, y - 17 * mm, f"GSTIN: {client.get('gstin') or '—'}")
+
+    # order meta
+    y = H - 75 * mm
+    for label, val in [("Order ID", order.get("order_id", "")),
+                       ("PO Number", order.get("po_number") or "—"),
+                       ("Payment Terms", invoice.get("payment_terms", "")),
+                       ("Due Date", invoice.get("due_date", ""))]:
+        c.setFillColor(colors.HexColor("#94a3b8"))
+        c.setFont("Helvetica", 8)
+        c.drawString(20 * mm, y, label.upper())
+        c.setFillColor(colors.HexColor("#0f172a"))
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(20 * mm, y - 5 * mm, str(val))
+        y -= 12 * mm
+
+    # line item table
+    y = H - 130 * mm
+    c.setFillColor(colors.HexColor("#0f172a"))
+    c.rect(20 * mm, y, W - 40 * mm, 8 * mm, stroke=0, fill=1)
+    c.setFillColor(colors.white)
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(23 * mm, y + 2.5 * mm, "DESCRIPTION")
+    c.drawRightString(120 * mm, y + 2.5 * mm, "QTY")
+    c.drawRightString(150 * mm, y + 2.5 * mm, "RATE")
+    c.drawRightString(W - 23 * mm, y + 2.5 * mm, "AMOUNT")
+
+    y -= 10 * mm
+    c.setFillColor(colors.HexColor("#0f172a"))
+    c.setFont("Helvetica", 10)
+    c.drawString(23 * mm, y, order.get("product", ""))
+    c.setFillColor(colors.HexColor("#64748b"))
+    c.setFont("Helvetica", 8)
+    c.drawString(23 * mm, y - 4 * mm, order.get("product_code") or "")
+    c.setFillColor(colors.HexColor("#0f172a"))
+    c.setFont("Helvetica", 10)
+    c.drawRightString(120 * mm, y, f"{order.get('quantity', 0):,}")
+    c.drawRightString(150 * mm, y, rupees(order.get("unit_price", 0)))
+    c.drawRightString(W - 23 * mm, y, rupees(order.get("order_value", 0)))
+
+    # totals
+    y -= 25 * mm
+    for label, val, bold in [("Subtotal", order.get("order_value", 0), False),
+                             ("GST (18%)", order.get("gst", 0), False),
+                             ("TOTAL", invoice.get("total", 0), True)]:
+        c.setFillColor(colors.HexColor("#0f172a") if bold else colors.HexColor("#475569"))
+        c.setFont("Helvetica-Bold" if bold else "Helvetica", 11 if bold else 10)
+        c.drawRightString(150 * mm, y, label)
+        c.drawRightString(W - 23 * mm, y, rupees(val))
+        y -= 7 * mm
+
+    # footer
+    c.setStrokeColor(colors.HexColor("#e2e8f0"))
+    c.line(20 * mm, 30 * mm, W - 20 * mm, 30 * mm)
+    c.setFillColor(colors.HexColor("#94a3b8"))
+    c.setFont("Helvetica", 8)
+    c.drawString(20 * mm, 22 * mm, "Thank you for your business. Please make payment by the due date shown above.")
+    c.drawString(20 * mm, 17 * mm, "This is a computer-generated invoice and does not require a signature.")
+    c.showPage()
+    c.save()
+    return buf.getvalue()
 
 EMAIL_TEMPLATES = {
     "design_share": {"subject": "Design ready for your review — Order {order_id}", "intro": "Please find attached the latest design for your approval."},
@@ -558,8 +687,30 @@ async def create_invoice(order_id: str, data: InvoiceCreate, user=Depends(requir
         "created_at": now(),
     }
     await db.invoices.insert_one(doc)
+    # auto-generate PDF and store in GridFS
+    try:
+        client = await db.clients.find_one({"client_id": o["client_id"]}, {"_id": 0})
+        pdf_bytes = generate_invoice_pdf(o, doc, client)
+        pdf_name = f"{invoice_number}.pdf"
+        gridfs_id = await gridfs.upload_from_stream(f"{order_id}-{secrets.token_hex(3)}-{pdf_name}", pdf_bytes, metadata={"order_id": order_id, "content_type": "application/pdf"})
+        doc_record = {
+            "document_id": new_id("DOC"),
+            "order_id": order_id,
+            "name": pdf_name,
+            "category": "Invoice",
+            "content_type": "application/pdf",
+            "storage_id": str(gridfs_id),
+            "storage_backend": "mongo-gridfs",
+            "uploaded_by": user["name"],
+            "created_at": now(),
+            "invoice_id": doc["invoice_id"],
+        }
+        await db.documents.insert_one(doc_record)
+        await db.invoices.update_one({"invoice_id": doc["invoice_id"]}, {"$set": {"pdf_document_id": doc_record["document_id"]}})
+    except Exception:
+        logging.exception("Failed to generate invoice PDF")
     await db.orders.update_one({"order_id": order_id}, {"$set": {"invoice_status": "Generated", "invoice_number": invoice_number, "current_stage": "Payment"}})
-    await add_history(order_id, f"Invoice {invoice_number} generated", user["name"])
+    await add_history(order_id, f"Invoice {invoice_number} generated with PDF", user["name"])
     await notify(["sales", "accounts"], order_id, f"Invoice {invoice_number} generated for {o['client_name']}")
     return clean(doc)
 
@@ -705,7 +856,7 @@ class EmailSend(BaseModel):
     template: str = "generic"
     cc: List[EmailStr] = []
 
-def build_email_html(template_key, order, message, sender_name, invoice=None):
+def build_email_html(template_key, order, message, sender_name, invoice=None, approval_url=None):
     tpl = EMAIL_TEMPLATES.get(template_key, EMAIL_TEMPLATES["generic"])
     intro = tpl["intro"]
     rows = [
@@ -725,6 +876,14 @@ def build_email_html(template_key, order, message, sender_name, invoice=None):
         ]
     rows_html = "".join(f"<tr><td style='padding:8px 14px;color:#64748b;font-size:12px;'>{k}</td><td style='padding:8px 14px;color:#0f172a;font-size:13px;font-weight:600;'>{v}</td></tr>" for k, v in rows)
     body = (message or intro).replace("\n", "<br>")
+    cta_html = ""
+    if approval_url:
+        cta_html = f"""
+        <tr><td align='center' style='padding:8px 28px 24px;'>
+          <a href='{approval_url}' style='display:inline-block;background:#2563eb;color:#fff;text-decoration:none;padding:14px 28px;border-radius:8px;font-weight:700;font-size:13px;letter-spacing:.3px;'>Review &amp; approve online</a>
+          <div style='color:#94a3b8;font-size:11px;margin-top:10px;'>One-click approve, request revision or reject.</div>
+        </td></tr>
+        """
     return f"""
     <table width='100%' cellpadding='0' cellspacing='0' style='background:#f8fafc;padding:32px 0;font-family:Arial,sans-serif;'>
       <tr><td align='center'>
@@ -739,6 +898,7 @@ def build_email_html(template_key, order, message, sender_name, invoice=None):
               {rows_html}
             </table>
           </td></tr>
+          {cta_html}
           <tr><td style='padding:12px 28px 26px;color:#64748b;font-size:12px;line-height:1.6;border-top:1px solid #e2e8f0;'>
             Sent by <b style='color:#0f172a;'>{sender_name}</b> · Pinaki Solutions<br>
             <span style='color:#94a3b8;'>Reply to this email to reach the account team.</span>
@@ -749,7 +909,7 @@ def build_email_html(template_key, order, message, sender_name, invoice=None):
     """
 
 @api.post("/emails/send")
-async def send_email(data: EmailSend, user=Depends(current_user)):
+async def send_email(data: EmailSend, request: Request, user=Depends(current_user)):
     if not os.environ.get("RESEND_API_KEY"):
         raise HTTPException(400, "Email is not configured. Please add RESEND_API_KEY to the backend to enable client emails.")
     order = await db.orders.find_one({"order_id": data.order_id}, {"_id": 0})
@@ -760,8 +920,12 @@ async def send_email(data: EmailSend, user=Depends(current_user)):
     if data.template in ("invoice", "payment_reminder"):
         invoice = await db.invoices.find_one({"order_id": data.order_id}, {"_id": 0})
     subject = data.subject or tpl["subject"].format(order_id=order.get("order_id"), invoice_number=(invoice or {}).get("invoice_number", ""))
+    # auto-attach invoice PDF for invoice/payment_reminder templates
+    doc_ids = list(data.document_ids)
+    if data.template in ("invoice", "payment_reminder") and invoice and invoice.get("pdf_document_id") and invoice["pdf_document_id"] not in doc_ids:
+        doc_ids.append(invoice["pdf_document_id"])
     attachments = []
-    for doc_id in data.document_ids:
+    for doc_id in doc_ids:
         d = await db.documents.find_one({"document_id": doc_id}, {"_id": 0})
         if not d:
             continue
@@ -771,7 +935,14 @@ async def send_email(data: EmailSend, user=Depends(current_user)):
             attachments.append({"filename": d["name"], "content": base64.b64encode(content).decode()})
         except Exception:
             continue
-    html = build_email_html(data.template, order, data.message, user["name"], invoice)
+    # embed approval link for design_share
+    approval_url = None
+    if data.template == "design_share":
+        latest_design = await db.designs.find_one({"order_id": data.order_id}, {"_id": 0}, sort=[("version", -1)])
+        if latest_design:
+            token = sign_approval_token(latest_design["design_id"], data.order_id)
+            approval_url = f"{frontend_url(request)}/approve/{token}"
+    html = build_email_html(data.template, order, data.message, user["name"], invoice, approval_url)
     params = {
         "from": f"Pinaki Solutions <{SENDER_EMAIL}>",
         "to": [data.recipient],
@@ -797,7 +968,7 @@ async def send_email(data: EmailSend, user=Depends(current_user)):
         "subject": subject,
         "template": data.template,
         "provider_id": provider_id,
-        "document_ids": data.document_ids,
+        "document_ids": doc_ids,
         "sent_by": user["name"],
         "created_at": now(),
     }
@@ -816,6 +987,147 @@ async def all_emails(user=Depends(current_user)):
 @api.get("/emails/config")
 async def email_config(user=Depends(current_user)):
     return {"configured": bool(os.environ.get("RESEND_API_KEY")), "sender": SENDER_EMAIL}
+
+# ---------- public approval link ----------
+class PublicApprovalDecision(BaseModel):
+    status: str  # Approved / Rejected / Revision Required
+    approver: str
+    comments: str = ""
+
+@api.get("/public/approval/{token}")
+async def public_approval_get(token: str):
+    try:
+        payload = verify_approval_token(token)
+    except jwt.PyJWTError:
+        raise HTTPException(400, "This approval link is invalid or has expired")
+    order = await db.orders.find_one({"order_id": payload["order_id"]}, {"_id": 0})
+    design = await db.designs.find_one({"design_id": payload["sub"]}, {"_id": 0})
+    if not order or not design:
+        raise HTTPException(404, "Order or design not found")
+    approvals = await db.approvals.find({"order_id": order["order_id"], "design_id": design["design_id"]}, {"_id": 0}).sort("created_at", -1).to_list(10)
+    return {
+        "order": {k: order.get(k) for k in ("order_id", "client_name", "product", "product_code", "quantity", "unit_price", "total_value", "required_delivery_date", "current_stage", "approval_status")},
+        "design": {k: design.get(k) for k in ("design_id", "version", "designer", "comments", "created_at", "file_name")},
+        "documents": await db.documents.find({"order_id": order["order_id"], "category": "Design File"}, {"_id": 0}).to_list(20),
+        "decided": len(approvals) > 0,
+        "history": approvals,
+    }
+
+@api.post("/public/approval/{token}")
+async def public_approval_post(token: str, data: PublicApprovalDecision):
+    try:
+        payload = verify_approval_token(token)
+    except jwt.PyJWTError:
+        raise HTTPException(400, "This approval link is invalid or has expired")
+    if data.status not in ("Approved", "Rejected", "Revision Required"):
+        raise HTTPException(400, "Invalid status")
+    order = await db.orders.find_one({"order_id": payload["order_id"]}, {"_id": 0})
+    if not order:
+        raise HTTPException(404, "Order not found")
+    approval = {
+        "approval_id": new_id("AP"),
+        "order_id": payload["order_id"],
+        "design_id": payload["sub"],
+        "status": data.status,
+        "approver": data.approver,
+        "comments": data.comments,
+        "source": "client_link",
+        "created_at": now(),
+    }
+    await db.approvals.insert_one(approval)
+    updates = {"approval_status": data.status, "updated_at": now()}
+    if data.status == "Approved":
+        updates["current_stage"] = "Production"
+        await notify(["production", "sales"], payload["order_id"], f"{payload['order_id']} approved by client via link")
+    else:
+        updates["current_stage"] = "Design"
+        await notify(["design", "sales"], payload["order_id"], f"{payload['order_id']} needs {data.status.lower()} (client feedback)")
+    await db.orders.update_one({"order_id": payload["order_id"]}, {"$set": updates})
+    await add_history(payload["order_id"], f"Client via link: {data.status}", data.approver, data.comments)
+    return {"ok": True, "status": data.status}
+
+# ---------- background: overdue reminders ----------
+async def send_overdue_reminder(invoice, order, days_late):
+    if not os.environ.get("RESEND_API_KEY"):
+        return False
+    client = await db.clients.find_one({"client_id": invoice.get("client_id")}, {"_id": 0})
+    recipient = (client or {}).get("email")
+    if not recipient:
+        return False
+    tpl = EMAIL_TEMPLATES["payment_reminder"]
+    subject = tpl["subject"].format(order_id=order.get("order_id"), invoice_number=invoice["invoice_number"]) + f" ({days_late} day{'s' if days_late != 1 else ''} overdue)"
+    body = (
+        f"This is an automated reminder — invoice {invoice['invoice_number']} is now "
+        f"{days_late} days past its due date of {invoice['due_date']}. "
+        f"Please arrange payment at your earliest convenience or reply to this email if there is a query."
+    )
+    attachments = []
+    if invoice.get("pdf_document_id"):
+        d = await db.documents.find_one({"document_id": invoice["pdf_document_id"]}, {"_id": 0})
+        if d:
+            try:
+                stream = await gridfs.open_download_stream(ObjectId(d["storage_id"]))
+                content = await stream.read()
+                attachments.append({"filename": d["name"], "content": base64.b64encode(content).decode()})
+            except Exception:
+                pass
+    html = build_email_html("payment_reminder", order, body, "Pinaki Accounts", invoice)
+    params = {"from": f"Pinaki Solutions <{SENDER_EMAIL}>", "to": [recipient], "subject": subject, "html": html}
+    if attachments:
+        params["attachments"] = attachments
+    try:
+        result = await asyncio.to_thread(resend.Emails.send, params)
+    except Exception:
+        logging.exception("Auto reminder send failed")
+        return False
+    provider_id = result.get("id") if isinstance(result, dict) else getattr(result, "id", None)
+    await db.emails.insert_one({
+        "email_id": new_id("EM"), "order_id": order["order_id"], "client_name": order.get("client_name"),
+        "recipient": recipient, "cc": [], "subject": subject, "template": "payment_reminder",
+        "provider_id": provider_id, "document_ids": [invoice.get("pdf_document_id")] if invoice.get("pdf_document_id") else [],
+        "sent_by": "Automation", "created_at": now(), "auto": True, "days_late": days_late,
+    })
+    await db.invoices.update_one({"invoice_id": invoice["invoice_id"]}, {"$addToSet": {"reminders_sent": days_late}})
+    await add_history(order["order_id"], f"Auto reminder sent — {days_late} days overdue", "Automation")
+    return True
+
+async def check_overdue_reminders():
+    invoices = await db.invoices.find({"status": {"$nin": ["Paid"]}}, {"_id": 0}).to_list(1000)
+    payments = await db.payments.find({}, {"_id": 0}).to_list(2000)
+    paid_map = {}
+    for p in payments:
+        paid_map[p["invoice_id"]] = paid_map.get(p["invoice_id"], 0) + p.get("amount", 0)
+    today_dt = datetime.now(timezone.utc).date()
+    for inv in invoices:
+        if paid_map.get(inv["invoice_id"], 0) >= inv.get("total", 0):
+            continue
+        try:
+            due = datetime.fromisoformat(inv["due_date"]).date()
+        except Exception:
+            continue
+        days_late = (today_dt - due).days
+        already = inv.get("reminders_sent", [])
+        for threshold in (3, 7):
+            if days_late >= threshold and threshold not in already:
+                order = await db.orders.find_one({"order_id": inv["order_id"]}, {"_id": 0})
+                if order:
+                    await send_overdue_reminder(inv, order, days_late)
+                    break
+
+async def reminder_loop():
+    # small delay so it doesn't hammer during startup
+    await asyncio.sleep(30)
+    while True:
+        try:
+            await check_overdue_reminders()
+        except Exception:
+            logging.exception("reminder loop iteration failed")
+        await asyncio.sleep(3600)  # once per hour
+
+@api.post("/emails/run-reminders")
+async def run_reminders_now(user=Depends(require("admin", "accounts"))):
+    await check_overdue_reminders()
+    return {"ok": True}
 
 # ---------- users ----------
 @api.get("/users")
@@ -884,6 +1196,8 @@ async def seed():
                 inv_no = f"INV-2603-{secrets.token_hex(2).upper()}"
                 await db.invoices.insert_one({"invoice_id": new_id("IV"), "invoice_number": inv_no, "order_id": base["order_id"], "client_id": o["client_id"], "client_name": base["client_name"], "invoice_date": today(), "due_date": "2026-04-20", "payment_terms": "Net 30", "taxable": subtotal, "gst": gst, "total": subtotal + gst, "status": "Generated", "created_at": now()})
                 await db.orders.update_one({"order_id": base["order_id"]}, {"$set": {"invoice_number": inv_no, "current_stage": "Payment"}})
+    # start background reminder loop
+    asyncio.create_task(reminder_loop())
 
 app.include_router(api)
 app.add_middleware(
