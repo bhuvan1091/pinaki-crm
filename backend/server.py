@@ -3,6 +3,8 @@ from pathlib import Path
 load_dotenv(Path(__file__).parent / ".env", override=True)
 
 import os
+import io
+import csv
 import logging
 import secrets
 import asyncio
@@ -960,6 +962,107 @@ async def leads_pipeline(user=Depends(current_user)):
     win_rate = round(100 * len(won_leads) / closed, 1) if closed else 0.0
     open_value = round(sum(v for s, v in totals.items() if s not in ("Won", "Lost")), 2)
     return {"buckets": buckets, "totals": totals, "win_rate": win_rate, "open_value": open_value}
+
+LEAD_IMPORT_COLUMNS = ["company_name", "contact_person", "email", "phone", "source", "estimated_value", "product_interest", "assigned_to", "next_follow_up", "status", "notes"]
+LEAD_COLUMN_ALIASES = {"company": "company_name", "contact": "contact_person", "phone_number": "phone", "value": "estimated_value", "product": "product_interest", "owner": "assigned_to", "follow_up": "next_follow_up", "follow-up": "next_follow_up", "next_followup": "next_follow_up"}
+
+@api.get("/leads/import-template")
+async def leads_import_template(user=Depends(current_user)):
+    def gen():
+        yield (",".join(LEAD_IMPORT_COLUMNS) + "\n").encode()
+        yield ("Acme Corp,John Doe,john@acme.example,+91 9000011111,Website,150000,Custom boxes,Riya Shah,2026-03-01,New,Initial outreach\n").encode()
+    return StreamingResponse(gen(), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="leads_template.csv"'})
+
+@api.post("/leads/import")
+async def import_leads(file: UploadFile = File(...), user=Depends(require("admin", "sales"))):
+    filename = file.filename or "upload"
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    content = await file.read()
+    rows = []
+    try:
+        if ext == "csv" or file.content_type == "text/csv":
+            text = content.decode("utf-8-sig", errors="ignore")
+            reader = csv.DictReader(io.StringIO(text))
+            rows = [dict(r) for r in reader]
+        elif ext in ("xlsx", "xlsm"):
+            try:
+                from openpyxl import load_workbook
+            except ImportError:
+                raise HTTPException(400, "Excel support requires openpyxl on the server")
+            wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+            ws = wb.active
+            it = ws.iter_rows(values_only=True)
+            first = next(it, None)
+            if not first:
+                raise HTTPException(400, "The file appears to be empty")
+            headers = [str(h).strip() if h is not None else "" for h in first]
+            for r in it:
+                if all(c is None or str(c).strip() == "" for c in r):
+                    continue
+                rows.append({headers[i]: (r[i] if i < len(r) else "") for i in range(len(headers)) if headers[i]})
+        else:
+            raise HTTPException(400, "Please upload a .csv or .xlsx file")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"Could not read the file: {str(e)[:120]}")
+
+    inserted, skipped = 0, 0
+    errors = []
+    for idx, raw_row in enumerate(rows, start=2):
+        normalized = {}
+        for k, v in (raw_row or {}).items():
+            if not k:
+                continue
+            key = str(k).strip().lower().replace(" ", "_").replace("-", "_")
+            key = LEAD_COLUMN_ALIASES.get(key, key)
+            if isinstance(v, str):
+                v = v.strip()
+            normalized[key] = v
+        try:
+            company = normalized.get("company_name") or ""
+            contact = normalized.get("contact_person") or ""
+            email = normalized.get("email") or ""
+            if not company or not contact or not email:
+                errors.append({"row": idx, "message": "Missing required company_name / contact_person / email"})
+                skipped += 1
+                continue
+            status = normalized.get("status") or "New"
+            if status not in LEAD_STATUSES:
+                status = "New"
+            try:
+                value = float(normalized.get("estimated_value") or 0)
+            except Exception:
+                value = 0.0
+            follow_up = normalized.get("next_follow_up") or ""
+            if follow_up and hasattr(follow_up, "isoformat"):
+                follow_up = follow_up.isoformat()[:10]
+            follow_up = str(follow_up)[:10] if follow_up else ""
+            doc = {
+                "lead_id": new_id("LD"),
+                "company_name": str(company),
+                "contact_person": str(contact),
+                "email": str(email),
+                "phone": str(normalized.get("phone") or ""),
+                "source": str(normalized.get("source") or "Import"),
+                "estimated_value": value,
+                "product_interest": str(normalized.get("product_interest") or ""),
+                "assigned_to": str(normalized.get("assigned_to") or user["name"]),
+                "next_follow_up": follow_up,
+                "notes": str(normalized.get("notes") or ""),
+                "status": status,
+                "activities": [{"type": "note", "summary": f"Imported from {filename}", "by": user["name"], "at": now()}],
+                "created_by": user["name"],
+                "created_at": now(),
+                "import_source": filename,
+            }
+            await db.leads.insert_one(doc)
+            inserted += 1
+        except Exception as e:
+            errors.append({"row": idx, "message": str(e)[:160]})
+            skipped += 1
+    logging.info(f"Lead import: {inserted}/{len(rows)} inserted from {filename}")
+    return {"filename": filename, "total": len(rows), "inserted": inserted, "skipped": skipped, "errors": errors[:25], "columns_expected": LEAD_IMPORT_COLUMNS}
 
 @api.get("/leads")
 async def list_leads(status: str = "", assigned: str = "", search: str = "", user=Depends(current_user)):

@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
-import { X, ChevronRight, Search, Phone, Mail, MessageSquare, Calendar, UserPlus, Kanban, Table as TableIcon } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { X, ChevronRight, Search, Phone, Mail, MessageSquare, Calendar, UserPlus, Kanban, Table as TableIcon, Upload, Download, CheckCircle2, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "../../lib/api";
+import axios from "axios";
+import { API, api } from "../../lib/api";
 import { compactMoney, money, testid } from "../../lib/format";
 
 const STATUSES = ["New", "Contacted", "Qualified", "Proposal Sent", "Negotiation", "Won", "Lost"];
@@ -15,6 +16,7 @@ export default function Leads({ user, onOpenOrder }) {
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [showNew, setShowNew] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [detailId, setDetailId] = useState(null);
   const [dragging, setDragging] = useState(null);
   const [dropTarget, setDropTarget] = useState(null);
@@ -70,6 +72,7 @@ export default function Leads({ user, onOpenOrder }) {
             <button className={view === "table" ? "active" : ""} data-testid="leads-view-table" onClick={() => setView("table")}><TableIcon size={14} /> Table</button>
             <button className={view === "pipeline" ? "active" : ""} data-testid="leads-view-pipeline" onClick={() => setView("pipeline")}><Kanban size={14} /> Pipeline</button>
           </div>
+          {canEdit && <button className="outline-btn" data-testid="leads-import-button" onClick={() => setShowImport(true)}><Upload size={14} /> Import</button>}
           {canEdit && <button className="primary-btn compact" data-testid="leads-new-button" onClick={() => setShowNew(true)}>+ New lead</button>}
         </div>
       </div>
@@ -156,6 +159,7 @@ export default function Leads({ user, onOpenOrder }) {
       )}
 
       {showNew && <NewLeadModal user={user} onClose={(refreshed) => { setShowNew(false); if (refreshed) load(); }} />}
+      {showImport && <ImportLeadsModal onClose={(refreshed) => { setShowImport(false); if (refreshed) load(); }} />}
       {detailId && <LeadDetail leadId={detailId} user={user} onClose={(refreshed) => { setDetailId(null); if (refreshed) load(); }} onOpenOrder={onOpenOrder} />}
     </div>
   );
