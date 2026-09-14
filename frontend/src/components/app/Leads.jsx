@@ -16,6 +16,8 @@ export default function Leads({ user, onOpenOrder }) {
   const [statusFilter, setStatusFilter] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [detailId, setDetailId] = useState(null);
+  const [dragging, setDragging] = useState(null);
+  const [dropTarget, setDropTarget] = useState(null);
   const canEdit = ["admin", "sales"].includes(user.role);
 
   const load = async () => {
@@ -31,6 +33,29 @@ export default function Leads({ user, onOpenOrder }) {
   }), [leads, q, statusFilter]);
 
   const totals = pipeline?.totals || {};
+
+  const onDropCard = async (targetStatus) => {
+    if (!dragging || !canEdit) { setDragging(null); setDropTarget(null); return; }
+    const lead = dragging;
+    setDragging(null); setDropTarget(null);
+    if (lead.status === targetStatus) return;
+    // optimistic update
+    setPipeline((p) => {
+      if (!p) return p;
+      const next = { ...p, buckets: { ...p.buckets } };
+      next.buckets[lead.status] = (next.buckets[lead.status] || []).filter((x) => x.lead_id !== lead.lead_id);
+      next.buckets[targetStatus] = [{ ...lead, status: targetStatus }, ...(next.buckets[targetStatus] || [])];
+      return next;
+    });
+    try {
+      await api("patch", `/leads/${lead.lead_id}`, { status: targetStatus });
+      toast.success(`${lead.company_name} → ${targetStatus}`);
+      load();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Could not move");
+      load();
+    }
+  };
 
   return (
     <div className="content">
@@ -92,7 +117,14 @@ export default function Leads({ user, onOpenOrder }) {
       ) : (
         <div className="kanban" data-testid="leads-kanban">
           {STATUSES.map((s) => (
-            <div key={s} className="kanban-col" data-testid={`kanban-col-${testid(s)}`}>
+            <div
+              key={s}
+              className={`kanban-col ${dropTarget === s ? "drop-hover" : ""}`}
+              data-testid={`kanban-col-${testid(s)}`}
+              onDragOver={(e) => { if (canEdit && dragging) { e.preventDefault(); setDropTarget(s); } }}
+              onDragLeave={() => setDropTarget((t) => (t === s ? null : t))}
+              onDrop={() => onDropCard(s)}
+            >
               <div className="kanban-head">
                 <div>
                   <span className={`badge ${STATUS_TONE[s]}`}>{s}</span>
@@ -102,13 +134,21 @@ export default function Leads({ user, onOpenOrder }) {
               </div>
               <div className="kanban-cards">
                 {(pipeline?.buckets?.[s] || []).map((l) => (
-                  <button key={l.lead_id} className="kanban-card" onClick={() => setDetailId(l.lead_id)} data-testid={`kanban-card-${l.lead_id}`}>
+                  <button
+                    key={l.lead_id}
+                    className={`kanban-card ${dragging?.lead_id === l.lead_id ? "dragging" : ""}`}
+                    onClick={() => setDetailId(l.lead_id)}
+                    data-testid={`kanban-card-${l.lead_id}`}
+                    draggable={canEdit}
+                    onDragStart={(e) => { setDragging(l); e.dataTransfer.effectAllowed = "move"; }}
+                    onDragEnd={() => { setDragging(null); setDropTarget(null); }}
+                  >
                     <b>{l.company_name}</b>
                     <small>{l.contact_person}</small>
                     <div className="kanban-meta"><span>{compactMoney(l.estimated_value)}</span><span>{l.next_follow_up || "—"}</span></div>
                   </button>
                 ))}
-                {(pipeline?.buckets?.[s] || []).length === 0 && <div className="kanban-empty">—</div>}
+                {(pipeline?.buckets?.[s] || []).length === 0 && <div className="kanban-empty">{canEdit ? "Drop here" : "—"}</div>}
               </div>
             </div>
           ))}

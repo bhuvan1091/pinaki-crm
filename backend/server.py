@@ -1479,6 +1479,95 @@ async def unsnooze_invoice(invoice_id: str, user=Depends(require("admin", "accou
     await add_history(inv["order_id"], "Reminder snooze cleared", user["name"])
     return {"ok": True}
 
+# ---------- daily lead follow-up reminders ----------
+def followup_html(owner, leads, today):
+    rows = ""
+    for l in leads:
+        overdue_txt = "Today" if l.get("next_follow_up") == today else f"Overdue · {l.get('next_follow_up')}"
+        tone = "#dc2626" if l.get("next_follow_up") != today else "#a16207"
+        rows += (
+            f"<tr>"
+            f"<td style='padding:10px 14px;font-size:12.5px;color:#0f172a;'><b>{l.get('company_name')}</b><br>"
+            f"<span style='color:#94a3b8;font-size:11px;'>{l.get('contact_person','')} · {l.get('email','')}</span></td>"
+            f"<td style='padding:10px 14px;font-size:11px;color:#334155;'>{l.get('status')}</td>"
+            f"<td style='padding:10px 14px;font-size:11px;color:{tone};text-align:right;font-weight:700;'>{overdue_txt}</td>"
+            f"</tr>"
+        )
+    return f"""
+    <table width='100%' cellpadding='0' cellspacing='0' style='background:#f8fafc;padding:32px 0;font-family:Arial,sans-serif;'>
+      <tr><td align='center'>
+        <table width='600' cellpadding='0' cellspacing='0' style='background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 4px 12px rgba(15,23,42,.08);'>
+          <tr><td style='background:#0f172a;padding:22px 28px;'>
+            <div style='color:#93c5fd;font-size:11px;letter-spacing:2px;font-weight:700;'>PINAKI SOLUTIONS · SALES</div>
+            <div style='color:#fff;font-size:22px;font-weight:700;margin-top:4px;'>Today's follow-ups</div>
+            <div style='color:#cbd5e1;font-size:12px;margin-top:2px;'>Hi {owner}, {len(leads)} lead(s) need a touch today.</div>
+          </td></tr>
+          <tr><td style='padding:14px 28px 22px;'>
+            <table cellpadding='0' cellspacing='0' style='width:100%;background:#f8fafc;border-radius:8px;overflow:hidden;'>
+              <tr><td style='padding:8px 14px;font-size:10px;color:#94a3b8;letter-spacing:1px;font-weight:700;'>LEAD</td><td style='padding:8px 14px;font-size:10px;color:#94a3b8;letter-spacing:1px;font-weight:700;'>STATUS</td><td style='padding:8px 14px;font-size:10px;color:#94a3b8;letter-spacing:1px;text-align:right;font-weight:700;'>DUE</td></tr>
+              {rows}
+            </table>
+          </td></tr>
+          <tr><td style='padding:12px 28px 22px;color:#94a3b8;font-size:11px;border-top:1px solid #e2e8f0;'>Automated daily digest · Pinaki Solutions CRM</td></tr>
+        </table>
+      </td></tr>
+    </table>
+    """
+
+async def send_followup_reminders(force=False):
+    now_ist_dt = ist_now()
+    key = now_ist_dt.strftime("%Y-%m-%d")
+    state = await db.followup_state.find_one({"_id": "daily"}) or {}
+    if not force and state.get("last_date") == key:
+        return {"sent": 0, "reason": "already sent today", "leads": 0}
+    today = now_ist_dt.date().isoformat()
+    leads = await db.leads.find({
+        "status": {"$nin": ["Won", "Lost"]},
+        "next_follow_up": {"$lte": today, "$ne": ""},
+    }, {"_id": 0}).to_list(2000)
+    by_owner = {}
+    for l in leads:
+        by_owner.setdefault(l.get("assigned_to") or "Sales", []).append(l)
+    email_sent = 0
+    for owner, lst in by_owner.items():
+        # in-app notifications for every lead
+        for lead in lst:
+            await db.notifications.insert_one({
+                "notif_id": new_id("NT"), "role": "sales", "order_id": lead.get("lead_id"),
+                "message": f"Follow up with {lead['company_name']} — {'today' if lead['next_follow_up']==today else 'overdue since '+lead['next_follow_up']}",
+                "read": False, "created_at": now(),
+            })
+        # one consolidated email to the owner
+        if os.environ.get("RESEND_API_KEY"):
+            user = await db.users.find_one({"name": owner}, {"_id": 0, "email": 1, "name": 1})
+            if user and user.get("email"):
+                subject = f"Today's follow-ups — {len(lst)} lead(s) need attention"
+                params = {"from": f"Pinaki Solutions <{SENDER_EMAIL}>", "to": [user["email"]], "subject": subject, "html": followup_html(owner, lst, today)}
+                try:
+                    result = await asyncio.to_thread(resend.Emails.send, params)
+                    provider_id = result.get("id") if isinstance(result, dict) else getattr(result, "id", None)
+                    await db.emails.insert_one({"email_id": new_id("EM"), "order_id": None, "client_name": None, "recipient": user["email"], "cc": [], "subject": subject, "template": "followup_daily", "provider_id": provider_id, "sent_by": "Automation", "created_at": now(), "auto": True})
+                    email_sent += 1
+                except Exception:
+                    logging.exception("followup email send failed")
+    await db.followup_state.update_one({"_id": "daily"}, {"$set": {"last_date": key, "last_run_at": now(), "leads": len(leads), "emails_sent": email_sent}}, upsert=True)
+    return {"sent": email_sent, "leads": len(leads), "owners": len(by_owner)}
+
+async def followup_loop():
+    await asyncio.sleep(60)
+    while True:
+        try:
+            now_ist_dt = ist_now()
+            if 9 <= now_ist_dt.hour < 10:
+                await send_followup_reminders()
+        except Exception:
+            logging.exception("followup loop error")
+        await asyncio.sleep(1800)
+
+@api.post("/emails/run-followups")
+async def run_followups_now(user=Depends(require("admin", "sales", "management"))):
+    return await send_followup_reminders(force=True)
+
 # ---------- background: overdue reminders ----------
 async def send_overdue_reminder(invoice, order, days_late):
     if not os.environ.get("RESEND_API_KEY"):
@@ -1720,6 +1809,7 @@ async def seed():
     # start background reminder loop
     asyncio.create_task(reminder_loop())
     asyncio.create_task(digest_loop())
+    asyncio.create_task(followup_loop())
 
 app.include_router(api)
 app.add_middleware(
