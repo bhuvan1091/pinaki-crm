@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { ChevronRight, Upload, Download, FileText } from "lucide-react";
+import { ChevronRight, Upload, Download, FileText, Send } from "lucide-react";
 import { api, uploadFile, downloadDocument } from "../../lib/api";
 import { stages, money, compactMoney, badgeTone, testid } from "../../lib/format";
+import SendEmailModal from "./SendEmailModal";
 
-const TABS = ["Overview", "Design", "Approval", "Production", "Dispatch", "Delivery", "Invoice", "Payment", "Documents", "Activity"];
+const TABS = ["Overview", "Design", "Approval", "Production", "Dispatch", "Delivery", "Invoice", "Payment", "Documents", "Emails", "Activity"];
 
 function StatusBadge({ children }) {
   return <span className={`badge ${badgeTone(children)}`}>{children}</span>;
@@ -15,6 +16,7 @@ export default function OrderDetail({ orderId, onBack, onChange, user }) {
   const [tab, setTab] = useState("Overview");
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
+  const [emailModal, setEmailModal] = useState(null); // { template, docs }
   const fileInput = useRef(null);
 
   const load = useCallback(async () => {
@@ -72,7 +74,10 @@ export default function OrderDetail({ orderId, onBack, onChange, user }) {
           <h1>{order.product}</h1>
           <p className="muted">{order.client_name} · {(order.quantity || 0).toLocaleString()} units · Due {order.required_delivery_date} · {compactMoney(order.total_value)}</p>
         </div>
-        <StatusBadge>{order.current_stage}</StatusBadge>
+        <div className="stack" style={{ alignItems: "flex-end", gap: 10 }}>
+          <StatusBadge>{order.current_stage}</StatusBadge>
+          <button className="outline-btn" data-testid="order-send-email-button" onClick={() => setEmailModal({ template: "generic", docs: [] })}><Send size={14} /> Email client</button>
+        </div>
       </div>
 
       <section className="timeline" data-testid="order-lifecycle-timeline">
@@ -119,11 +124,11 @@ export default function OrderDetail({ orderId, onBack, onChange, user }) {
       )}
 
       {tab === "Design" && (
-        <DesignTab order={order} call={call} busy={busy} onUpload={handleUpload} fileInput={fileInput} user={user} />
+        <DesignTab order={order} call={call} busy={busy} onUpload={handleUpload} fileInput={fileInput} user={user} openEmail={setEmailModal} />
       )}
 
       {tab === "Approval" && (
-        <ApprovalTab order={order} call={call} busy={busy} user={user} />
+        <ApprovalTab order={order} call={call} busy={busy} user={user} openEmail={setEmailModal} />
       )}
 
       {tab === "Production" && (
@@ -131,23 +136,27 @@ export default function OrderDetail({ orderId, onBack, onChange, user }) {
       )}
 
       {tab === "Dispatch" && (
-        <DispatchTab order={order} call={call} busy={busy} user={user} />
+        <DispatchTab order={order} call={call} busy={busy} user={user} openEmail={setEmailModal} />
       )}
 
       {tab === "Delivery" && (
-        <DeliveryTab order={order} call={call} busy={busy} user={user} />
+        <DeliveryTab order={order} call={call} busy={busy} user={user} openEmail={setEmailModal} />
       )}
 
       {tab === "Invoice" && (
-        <InvoiceTab order={order} call={call} busy={busy} user={user} />
+        <InvoiceTab order={order} call={call} busy={busy} user={user} openEmail={setEmailModal} />
       )}
 
       {tab === "Payment" && (
-        <PaymentTab order={order} call={call} busy={busy} user={user} />
+        <PaymentTab order={order} call={call} busy={busy} user={user} openEmail={setEmailModal} />
       )}
 
       {tab === "Documents" && (
-        <DocumentsTab order={order} onUpload={handleUpload} busy={busy} />
+        <DocumentsTab order={order} onUpload={handleUpload} busy={busy} openEmail={setEmailModal} />
+      )}
+
+      {tab === "Emails" && (
+        <EmailsTab order={order} />
       )}
 
       {tab === "Activity" && (
@@ -160,6 +169,15 @@ export default function OrderDetail({ orderId, onBack, onChange, user }) {
             </div>
           ))}
         </section>
+      )}
+
+      {emailModal && (
+        <SendEmailModal
+          order={order}
+          defaultTemplate={emailModal.template}
+          defaultDocuments={emailModal.docs}
+          onClose={(sent) => { setEmailModal(null); if (sent) load(); }}
+        />
       )}
     </div>
   );
@@ -193,12 +211,17 @@ function NextAction({ order, user, call, busy }) {
   return <div className="waiting"><span className="dot amber" /> Waiting on {stages[Math.min(stages.indexOf(order.current_stage) + 1, stages.length - 1)]}</div>;
 }
 
-function DesignTab({ order, call, busy, onUpload, user }) {
+function DesignTab({ order, call, busy, onUpload, user, openEmail }) {
   const [comments, setComments] = useState("");
   const canAct = ["admin", "sales", "design"].includes(user.role);
+  const latestDesign = (order.designs || [])[0];
+  const designDocs = (order.documents || []).filter((d) => d.category === "Design File").map((d) => d.document_id);
   return (
     <section className="panel">
-      <div className="panel-title"><div><h3>Design versions</h3><p className="muted">Every version stays attached to the order.</p></div></div>
+      <div className="panel-title">
+        <div><h3>Design versions</h3><p className="muted">Every version stays attached to the order.</p></div>
+        {latestDesign && <button className="outline-btn" data-testid="design-send-email-button" onClick={() => openEmail({ template: "design_share", docs: designDocs })}><Send size={14} /> Share with client</button>}
+      </div>
       <div className="version-list">
         {(order.designs || []).length === 0 && <div className="empty-inline">No design versions yet.</div>}
         {(order.designs || []).map((d) => (
@@ -223,11 +246,14 @@ function DesignTab({ order, call, busy, onUpload, user }) {
   );
 }
 
-function ApprovalTab({ order, call, busy, user }) {
+function ApprovalTab({ order, call, busy, user, openEmail }) {
   const canAct = ["admin", "sales", "design"].includes(user.role);
   return (
     <section className="panel">
-      <div className="panel-title"><div><h3>Client approval</h3><p className="muted">Approvals unlock production. Rejections return the order to design.</p></div></div>
+      <div className="panel-title">
+        <div><h3>Client approval</h3><p className="muted">Approvals unlock production. Rejections return the order to design.</p></div>
+        <button className="outline-btn" data-testid="approval-send-email-button" onClick={() => openEmail({ template: "approval_request", docs: [] })}><Send size={14} /> Request approval</button>
+      </div>
       <div className="version-list">
         {(order.approvals || []).length === 0 && <div className="empty-inline">No approvals recorded yet.</div>}
         {(order.approvals || []).map((a) => (
@@ -279,13 +305,20 @@ function ProductionTab({ order, call, busy, user }) {
   );
 }
 
-function DispatchTab({ order, call, busy, user }) {
+function DispatchTab({ order, call, busy, user, openEmail }) {
   const canAct = ["admin", "dispatch"].includes(user.role);
   const [form, setForm] = useState({ dispatch_date: new Date().toISOString().slice(0, 10), quantity: order.quantity, transporter: "Bluedart Surface", tracking_number: "", delivery_address: "", remarks: "" });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const challanDocs = (order.documents || []).filter((d) => d.category === "Challan").map((d) => d.document_id);
   return (
     <section className="panel">
-      <div className="panel-title"><div><h3>Dispatch & challan</h3><p className="muted">Production must be completed before dispatch.</p></div><StatusBadge>{order.dispatch_status}</StatusBadge></div>
+      <div className="panel-title">
+        <div><h3>Dispatch & challan</h3><p className="muted">Production must be completed before dispatch.</p></div>
+        <div className="stack" style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+          <StatusBadge>{order.dispatch_status}</StatusBadge>
+          {order.challan_number && <button className="outline-btn" data-testid="dispatch-send-email-button" onClick={() => openEmail({ template: "challan", docs: challanDocs })}><Send size={14} /> Email challan</button>}
+        </div>
+      </div>
       <div className="facts">
         <div><small>Challan #</small><b className="mono">{order.challan_number || "—"}</b></div>
         <div><small>Tracking</small><b>{order.tracking_number || "—"}</b></div>
@@ -313,13 +346,20 @@ function DispatchTab({ order, call, busy, user }) {
   );
 }
 
-function DeliveryTab({ order, call, busy, user }) {
+function DeliveryTab({ order, call, busy, user, openEmail }) {
   const canAct = ["admin", "dispatch", "accounts"].includes(user.role);
   const [form, setForm] = useState({ actual_date: new Date().toISOString().slice(0, 10), received_by: order.client_name, status: "Delivered", remarks: "" });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const podDocs = (order.documents || []).filter((d) => d.category === "Proof of Delivery").map((d) => d.document_id);
   return (
     <section className="panel">
-      <div className="panel-title"><div><h3>Delivery</h3><p className="muted">Confirm receipt to release the order to Accounts.</p></div><StatusBadge>{order.delivery_status}</StatusBadge></div>
+      <div className="panel-title">
+        <div><h3>Delivery</h3><p className="muted">Confirm receipt to release the order to Accounts.</p></div>
+        <div className="stack" style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+          <StatusBadge>{order.delivery_status}</StatusBadge>
+          {order.delivery_status === "Delivered" && <button className="outline-btn" data-testid="delivery-send-email-button" onClick={() => openEmail({ template: "delivery_pod", docs: podDocs })}><Send size={14} /> Email POD</button>}
+        </div>
+      </div>
       {(order.deliveries || []).map((d) => (
         <div key={d.delivery_id} className="version-row" data-testid={`delivery-row-${d.delivery_id}`}>
           <StatusBadge>{d.status}</StatusBadge>
@@ -341,13 +381,21 @@ function DeliveryTab({ order, call, busy, user }) {
   );
 }
 
-function InvoiceTab({ order, call, busy, user }) {
+function InvoiceTab({ order, call, busy, user, openEmail }) {
   const canAct = ["admin", "accounts"].includes(user.role);
   const [form, setForm] = useState({ invoice_date: new Date().toISOString().slice(0, 10), payment_terms: "Net 30", due_date: new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10) });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const invoiceDocs = (order.documents || []).filter((d) => d.category === "Invoice").map((d) => d.document_id);
+  const invoiceExists = (order.invoices || []).length > 0;
   return (
     <section className="panel">
-      <div className="panel-title"><div><h3>Invoice</h3><p className="muted">Invoices unlock only after delivery is confirmed.</p></div><StatusBadge>{order.invoice_status}</StatusBadge></div>
+      <div className="panel-title">
+        <div><h3>Invoice</h3><p className="muted">Invoices unlock only after delivery is confirmed.</p></div>
+        <div className="stack" style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+          <StatusBadge>{order.invoice_status}</StatusBadge>
+          {invoiceExists && <button className="outline-btn" data-testid="invoice-send-email-button" onClick={() => openEmail({ template: "invoice", docs: invoiceDocs })}><Send size={14} /> Email invoice</button>}
+        </div>
+      </div>
       {(order.invoices || []).map((i) => (
         <div key={i.invoice_id} className="version-row" data-testid={`invoice-row-${i.invoice_id}`}>
           <div className="version-badge">{i.invoice_number}</div>
@@ -369,14 +417,17 @@ function InvoiceTab({ order, call, busy, user }) {
   );
 }
 
-function PaymentTab({ order, call, busy, user }) {
+function PaymentTab({ order, call, busy, user, openEmail }) {
   const canAct = ["admin", "accounts"].includes(user.role);
   const invoice = (order.invoices || [])[0];
   const [form, setForm] = useState({ amount: order.total_value, date: new Date().toISOString().slice(0, 10), mode: "Bank Transfer", reference: "" });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   return (
     <section className="panel">
-      <div className="panel-title"><div><h3>Payments</h3><p className="muted">Track receipts against every generated invoice.</p></div></div>
+      <div className="panel-title">
+        <div><h3>Payments</h3><p className="muted">Track receipts against every generated invoice.</p></div>
+        {invoice && order.invoice_status !== "Paid" && <button className="outline-btn" data-testid="payment-send-email-button" onClick={() => openEmail({ template: "payment_reminder", docs: [] })}><Send size={14} /> Send reminder</button>}
+      </div>
       {(order.payments || []).length === 0 && <div className="empty-inline">No payments recorded.</div>}
       {(order.payments || []).map((p) => (
         <div key={p.payment_id} className="version-row" data-testid={`payment-row-${p.payment_id}`}>
@@ -399,11 +450,14 @@ function PaymentTab({ order, call, busy, user }) {
   );
 }
 
-function DocumentsTab({ order, onUpload, busy }) {
+function DocumentsTab({ order, onUpload, busy, openEmail }) {
   const [category, setCategory] = useState("Client PO");
   return (
     <section className="panel">
-      <div className="panel-title"><div><h3>Documents</h3><p className="muted">Every attachment stays linked to this order.</p></div></div>
+      <div className="panel-title">
+        <div><h3>Documents</h3><p className="muted">Every attachment stays linked to this order.</p></div>
+        {(order.documents || []).length > 0 && <button className="outline-btn" data-testid="documents-send-email-button" onClick={() => openEmail({ template: "generic", docs: (order.documents || []).map((d) => d.document_id) })}><Send size={14} /> Email selected</button>}
+      </div>
       <div className="upload-row">
         <select value={category} onChange={(e) => setCategory(e.target.value)} data-testid="document-category-select">
           <option>Client PO</option>
@@ -429,6 +483,33 @@ function DocumentsTab({ order, onUpload, busy }) {
               <small>{d.category} · {d.uploaded_by} · {new Date(d.created_at).toLocaleDateString()}</small>
             </div>
             <a className="text-btn" href={downloadDocument(d.document_id)} target="_blank" rel="noreferrer" data-testid={`document-download-${d.document_id}`}><Download size={14} /> Download</a>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+
+function EmailsTab({ order }) {
+  const [emails, setEmails] = useState([]);
+  useEffect(() => {
+    api("get", `/orders/${order.order_id}/emails`).then((r) => setEmails(r.data)).catch(() => {});
+  }, [order.order_id]);
+  return (
+    <section className="panel">
+      <div className="panel-title"><div><h3>Client emails</h3><p className="muted">Every email sent from this order.</p></div></div>
+      {emails.length === 0 && <div className="empty-inline">No emails have been sent from this order yet.</div>}
+      <div className="version-list">
+        {emails.map((e) => (
+          <div className="version-row" key={e.email_id} data-testid={`email-row-${e.email_id}`}>
+            <div className="version-badge">✉</div>
+            <div>
+              <b>{e.subject}</b>
+              <small>To {e.recipient}{e.cc?.length ? ` · CC ${e.cc.join(", ")}` : ""} · sent by {e.sent_by}</small>
+              <small>{new Date(e.created_at).toLocaleString()} · {(e.document_ids || []).length} attachment(s)</small>
+            </div>
+            <span className="badge blue">{e.template.replace(/_/g, " ")}</span>
           </div>
         ))}
       </div>

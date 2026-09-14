@@ -5,11 +5,14 @@ load_dotenv(Path(__file__).parent / ".env", override=True)
 import os
 import logging
 import secrets
+import asyncio
+import base64
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
 import bcrypt
 import jwt
+import resend
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -29,6 +32,19 @@ api = APIRouter(prefix="/api")
 JWT_ALGORITHM = "HS256"
 ROLES = ["admin", "sales", "design", "production", "dispatch", "accounts", "management"]
 STAGES = ["Order Received", "Design", "Client Approval", "Production", "Dispatch", "Challan", "Delivery", "Accounts", "Invoice", "Payment"]
+
+resend.api_key = os.environ.get("RESEND_API_KEY", "")
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "info@ashokatechnovations.com")
+
+EMAIL_TEMPLATES = {
+    "design_share": {"subject": "Design ready for your review — Order {order_id}", "intro": "Please find attached the latest design for your approval."},
+    "approval_request": {"subject": "Approval requested — Order {order_id}", "intro": "We are awaiting your confirmation to proceed with production."},
+    "challan": {"subject": "Delivery challan — Order {order_id}", "intro": "Please find attached the dispatch challan for your records."},
+    "delivery_pod": {"subject": "Proof of delivery — Order {order_id}", "intro": "Delivery has been completed. The proof of delivery is attached."},
+    "invoice": {"subject": "Invoice {invoice_number} — Order {order_id}", "intro": "Please find your invoice attached. Kindly process at your earliest convenience."},
+    "payment_reminder": {"subject": "Payment reminder — Invoice {invoice_number}", "intro": "This is a friendly reminder for the outstanding balance on the invoice below."},
+    "generic": {"subject": "Update on Order {order_id}", "intro": "Please see the update below."},
+}
 
 # ---------- helpers ----------
 def now(): return datetime.now(timezone.utc).isoformat()
@@ -678,6 +694,128 @@ async def reports(user=Depends(current_user)):
         "avg_order_to_delivery": round(sum(otd) / len(otd), 1) if otd else 0,
         "avg_order_to_invoice": round(sum(oti) / len(oti), 1) if oti else 0,
     }
+
+# ---------- emails ----------
+class EmailSend(BaseModel):
+    order_id: str
+    recipient: EmailStr
+    subject: str = ""
+    message: str = ""
+    document_ids: List[str] = []
+    template: str = "generic"
+    cc: List[EmailStr] = []
+
+def build_email_html(template_key, order, message, sender_name, invoice=None):
+    tpl = EMAIL_TEMPLATES.get(template_key, EMAIL_TEMPLATES["generic"])
+    intro = tpl["intro"]
+    rows = [
+        ("Order ID", order.get("order_id")),
+        ("Client", order.get("client_name")),
+        ("Product", order.get("product")),
+        ("Quantity", f"{order.get('quantity', 0):,} units"),
+        ("Order value", f"₹{order.get('total_value', 0):,.0f}"),
+        ("Required delivery", order.get("required_delivery_date", "—")),
+    ]
+    if invoice:
+        rows += [
+            ("Invoice #", invoice.get("invoice_number")),
+            ("Invoice date", invoice.get("invoice_date")),
+            ("Due date", invoice.get("due_date")),
+            ("Total", f"₹{invoice.get('total', 0):,.0f}"),
+        ]
+    rows_html = "".join(f"<tr><td style='padding:8px 14px;color:#64748b;font-size:12px;'>{k}</td><td style='padding:8px 14px;color:#0f172a;font-size:13px;font-weight:600;'>{v}</td></tr>" for k, v in rows)
+    body = (message or intro).replace("\n", "<br>")
+    return f"""
+    <table width='100%' cellpadding='0' cellspacing='0' style='background:#f8fafc;padding:32px 0;font-family:Arial,sans-serif;'>
+      <tr><td align='center'>
+        <table width='560' cellpadding='0' cellspacing='0' style='background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 4px 12px rgba(15,23,42,.08);'>
+          <tr><td style='background:#0f172a;padding:24px 28px;'>
+            <div style='color:#93c5fd;font-size:11px;letter-spacing:2px;font-weight:700;'>PINAKI SOLUTIONS</div>
+            <div style='color:#fff;font-size:22px;font-weight:700;margin-top:4px;'>Order lifecycle update</div>
+          </td></tr>
+          <tr><td style='padding:26px 28px 8px;color:#0f172a;font-size:14px;line-height:1.6;'>{body}</td></tr>
+          <tr><td style='padding:8px 28px 24px;'>
+            <table cellpadding='0' cellspacing='0' style='width:100%;border-collapse:collapse;background:#f8fafc;border-radius:8px;overflow:hidden;'>
+              {rows_html}
+            </table>
+          </td></tr>
+          <tr><td style='padding:12px 28px 26px;color:#64748b;font-size:12px;line-height:1.6;border-top:1px solid #e2e8f0;'>
+            Sent by <b style='color:#0f172a;'>{sender_name}</b> · Pinaki Solutions<br>
+            <span style='color:#94a3b8;'>Reply to this email to reach the account team.</span>
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+    """
+
+@api.post("/emails/send")
+async def send_email(data: EmailSend, user=Depends(current_user)):
+    if not os.environ.get("RESEND_API_KEY"):
+        raise HTTPException(400, "Email is not configured. Please add RESEND_API_KEY to the backend to enable client emails.")
+    order = await db.orders.find_one({"order_id": data.order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(404, "Order not found")
+    tpl = EMAIL_TEMPLATES.get(data.template, EMAIL_TEMPLATES["generic"])
+    invoice = None
+    if data.template in ("invoice", "payment_reminder"):
+        invoice = await db.invoices.find_one({"order_id": data.order_id}, {"_id": 0})
+    subject = data.subject or tpl["subject"].format(order_id=order.get("order_id"), invoice_number=(invoice or {}).get("invoice_number", ""))
+    attachments = []
+    for doc_id in data.document_ids:
+        d = await db.documents.find_one({"document_id": doc_id}, {"_id": 0})
+        if not d:
+            continue
+        try:
+            stream = await gridfs.open_download_stream(ObjectId(d["storage_id"]))
+            content = await stream.read()
+            attachments.append({"filename": d["name"], "content": base64.b64encode(content).decode()})
+        except Exception:
+            continue
+    html = build_email_html(data.template, order, data.message, user["name"], invoice)
+    params = {
+        "from": f"Pinaki Solutions <{SENDER_EMAIL}>",
+        "to": [data.recipient],
+        "subject": subject,
+        "html": html,
+    }
+    if data.cc:
+        params["cc"] = data.cc
+    if attachments:
+        params["attachments"] = attachments
+    try:
+        result = await asyncio.to_thread(resend.Emails.send, params)
+    except Exception as e:
+        logging.exception("Resend send failed")
+        raise HTTPException(502, f"Could not send email: {str(e)}")
+    provider_id = result.get("id") if isinstance(result, dict) else getattr(result, "id", None)
+    record = {
+        "email_id": new_id("EM"),
+        "order_id": data.order_id,
+        "client_name": order.get("client_name"),
+        "recipient": data.recipient,
+        "cc": data.cc,
+        "subject": subject,
+        "template": data.template,
+        "provider_id": provider_id,
+        "document_ids": data.document_ids,
+        "sent_by": user["name"],
+        "created_at": now(),
+    }
+    await db.emails.insert_one(record)
+    await add_history(data.order_id, f"Email sent to {data.recipient} — {subject}", user["name"], data.template)
+    return clean(record)
+
+@api.get("/orders/{order_id}/emails")
+async def order_emails(order_id: str, user=Depends(current_user)):
+    return await db.emails.find({"order_id": order_id}, {"_id": 0}).sort("created_at", -1).to_list(200)
+
+@api.get("/emails")
+async def all_emails(user=Depends(current_user)):
+    return await db.emails.find({}, {"_id": 0}).sort("created_at", -1).limit(200).to_list(200)
+
+@api.get("/emails/config")
+async def email_config(user=Depends(current_user)):
+    return {"configured": bool(os.environ.get("RESEND_API_KEY")), "sender": SENDER_EMAIL}
 
 # ---------- users ----------
 @api.get("/users")
