@@ -8,6 +8,7 @@ import Orders from "./components/app/Orders";
 import OrderDetail from "./components/app/OrderDetail";
 import Clients from "./components/app/Clients";
 import Contacts from "./components/app/Contacts";
+import Leads from "./components/app/Leads";
 import StageQueue from "./components/app/StageQueue";
 import Invoices from "./components/app/Invoices";
 import Payments from "./components/app/Payments";
@@ -90,6 +91,8 @@ function AppInner() {
     content = <Clients clients={clients} onOpen={openOrder} onChange={loadCore} user={user} />;
   } else if (page === "Contacts") {
     content = <Contacts clients={clients} user={user} />;
+  } else if (page === "Leads") {
+    content = <Leads user={user} onOpenOrder={openOrder} />;
   } else if (page === "Design") {
     content = <StageQueue title="Design" subtitle="Prepare artwork and share the latest version with the client." stages={["Order Received", "Design"]} orders={orders} onOpen={openOrder} action="design" />;
   } else if (page === "Approvals") {

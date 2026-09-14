@@ -37,6 +37,7 @@ api = APIRouter(prefix="/api")
 JWT_ALGORITHM = "HS256"
 ROLES = ["admin", "sales", "design", "production", "dispatch", "accounts", "management"]
 STAGES = ["Order Received", "Design", "Client Approval", "Production", "Dispatch", "Challan", "Delivery", "Accounts", "Invoice", "Payment"]
+LEAD_STATUSES = ["New", "Contacted", "Qualified", "Proposal Sent", "Negotiation", "Won", "Lost"]
 
 resend.api_key = os.environ.get("RESEND_API_KEY", "")
 SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "info@ashokatechnovations.com")
@@ -902,6 +903,178 @@ async def reports(user=Depends(current_user)):
         "avg_order_to_invoice": round(sum(oti) / len(oti), 1) if oti else 0,
     }
 
+# ---------- leads / sales pipeline ----------
+class LeadCreate(BaseModel):
+    company_name: str
+    contact_person: str
+    email: EmailStr
+    phone: str = ""
+    source: str = "Website"
+    estimated_value: float = 0
+    product_interest: str = ""
+    assigned_to: str = ""
+    next_follow_up: str = ""
+    notes: str = ""
+
+class LeadUpdate(BaseModel):
+    status: Optional[str] = None
+    company_name: Optional[str] = None
+    contact_person: Optional[str] = None
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    source: Optional[str] = None
+    estimated_value: Optional[float] = None
+    product_interest: Optional[str] = None
+    assigned_to: Optional[str] = None
+    next_follow_up: Optional[str] = None
+    notes: Optional[str] = None
+
+class LeadActivity(BaseModel):
+    type: str
+    summary: str
+    outcome: str = ""
+
+class LeadConvert(BaseModel):
+    gstin: str = ""
+    pan: str = ""
+    payment_terms: str = "Net 30"
+    credit_limit: float = 0
+    billing_address: str = ""
+    shipping_address: str = ""
+    create_order: bool = False
+    order_product: str = ""
+    order_quantity: int = 0
+    order_unit_price: float = 0
+    order_required_delivery: str = ""
+
+@api.get("/leads/pipeline")
+async def leads_pipeline(user=Depends(current_user)):
+    leads = await db.leads.find({}, {"_id": 0}).sort("created_at", -1).to_list(2000)
+    buckets = {s: [] for s in LEAD_STATUSES}
+    for l in leads:
+        buckets.setdefault(l.get("status", "New"), []).append(l)
+    totals = {s: round(sum(l.get("estimated_value", 0) for l in buckets[s]), 2) for s in LEAD_STATUSES}
+    won_leads = buckets.get("Won", [])
+    lost_leads = buckets.get("Lost", [])
+    closed = len(won_leads) + len(lost_leads)
+    win_rate = round(100 * len(won_leads) / closed, 1) if closed else 0.0
+    open_value = round(sum(v for s, v in totals.items() if s not in ("Won", "Lost")), 2)
+    return {"buckets": buckets, "totals": totals, "win_rate": win_rate, "open_value": open_value}
+
+@api.get("/leads")
+async def list_leads(status: str = "", assigned: str = "", search: str = "", user=Depends(current_user)):
+    q = {}
+    if status: q["status"] = status
+    if assigned: q["assigned_to"] = assigned
+    if search:
+        rx = {"$regex": search, "$options": "i"}
+        q["$or"] = [{"company_name": rx}, {"contact_person": rx}, {"email": rx}, {"product_interest": rx}, {"lead_id": rx}]
+    return await db.leads.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
+
+@api.post("/leads")
+async def create_lead(data: LeadCreate, user=Depends(require("admin", "sales"))):
+    doc = data.model_dump()
+    doc.update({
+        "lead_id": new_id("LD"),
+        "status": "New",
+        "activities": [{"type": "note", "summary": "Lead created", "by": user["name"], "at": now()}],
+        "assigned_to": data.assigned_to or user["name"],
+        "created_by": user["name"],
+        "created_at": now(),
+    })
+    await db.leads.insert_one(doc)
+    await notify(["sales"], None, f"New lead: {data.company_name}")
+    return clean(doc)
+
+@api.get("/leads/{lead_id}")
+async def lead_detail(lead_id: str, user=Depends(current_user)):
+    l = await db.leads.find_one({"lead_id": lead_id}, {"_id": 0})
+    if not l: raise HTTPException(404, "Lead not found")
+    if l.get("converted_client_id"):
+        l["client"] = await db.clients.find_one({"client_id": l["converted_client_id"]}, {"_id": 0})
+    return l
+
+@api.patch("/leads/{lead_id}")
+async def update_lead(lead_id: str, data: LeadUpdate, user=Depends(require("admin", "sales"))):
+    updates = {k: v for k, v in data.model_dump().items() if v is not None}
+    if not updates: raise HTTPException(400, "No changes provided")
+    if "status" in updates and updates["status"] not in LEAD_STATUSES:
+        raise HTTPException(400, "Invalid lead status")
+    updates["updated_at"] = now()
+    old = await db.leads.find_one({"lead_id": lead_id}, {"_id": 0})
+    if not old: raise HTTPException(404, "Lead not found")
+    push = None
+    if "status" in updates and updates["status"] != old.get("status"):
+        push = {"activities": {"type": "status_change", "summary": f"Moved from {old.get('status')} to {updates['status']}", "by": user["name"], "at": now()}}
+    op = {"$set": updates}
+    if push: op["$push"] = push
+    await db.leads.update_one({"lead_id": lead_id}, op)
+    return await db.leads.find_one({"lead_id": lead_id}, {"_id": 0})
+
+@api.post("/leads/{lead_id}/activities")
+async def add_lead_activity(lead_id: str, data: LeadActivity, user=Depends(require("admin", "sales"))):
+    if data.type not in ("call", "email", "meeting", "note", "status_change"):
+        raise HTTPException(400, "Invalid activity type")
+    entry = {**data.model_dump(), "by": user["name"], "at": now()}
+    r = await db.leads.update_one({"lead_id": lead_id}, {"$push": {"activities": entry}, "$set": {"updated_at": now()}})
+    if r.matched_count == 0: raise HTTPException(404, "Lead not found")
+    return entry
+
+@api.post("/leads/{lead_id}/convert")
+async def convert_lead(lead_id: str, data: LeadConvert, user=Depends(require("admin", "sales"))):
+    l = await db.leads.find_one({"lead_id": lead_id}, {"_id": 0})
+    if not l: raise HTTPException(404, "Lead not found")
+    if l.get("converted_client_id"): raise HTTPException(409, "Lead already converted")
+    client = {
+        "client_id": new_id("CL"),
+        "company_name": l["company_name"],
+        "contact_person": l["contact_person"],
+        "email": l["email"],
+        "phone": l.get("phone", ""),
+        "alternate_phone": "",
+        "gstin": data.gstin, "pan": data.pan,
+        "billing_address": data.billing_address,
+        "shipping_address": data.shipping_address or data.billing_address,
+        "payment_terms": data.payment_terms,
+        "credit_limit": float(data.credit_limit or 0),
+        "account_manager": l.get("assigned_to") or user["name"],
+        "status": "Active",
+        "notes": f"Converted from lead {l['lead_id']}. {l.get('notes','')}",
+        "source_lead_id": l["lead_id"],
+        "created_at": now(),
+    }
+    await db.clients.insert_one(client)
+    await db.leads.update_one({"lead_id": lead_id}, {"$set": {
+        "status": "Won", "converted_client_id": client["client_id"],
+        "converted_at": now(), "converted_by": user["name"], "updated_at": now(),
+    }, "$push": {"activities": {"type": "convert", "summary": f"Converted to client {client['company_name']}", "by": user["name"], "at": now()}}})
+    await notify(["sales"], None, f"Lead {l['company_name']} converted to client")
+    order = None
+    if data.create_order and data.order_product and data.order_quantity > 0 and data.order_unit_price > 0 and data.order_required_delivery:
+        subtotal = data.order_quantity * data.order_unit_price
+        gst = round(subtotal * 0.18, 2)
+        order = {
+            "order_id": f"PS-{datetime.now().strftime('%y%m')}-{secrets.token_hex(2).upper()}",
+            "client_id": client["client_id"], "client_name": client["company_name"],
+            "product": data.order_product, "product_code": "",
+            "quantity": data.order_quantity, "unit_price": data.order_unit_price,
+            "order_date": today(),
+            "order_value": subtotal, "gst": gst, "total_value": subtotal + gst,
+            "required_delivery_date": data.order_required_delivery,
+            "current_stage": "Order Received", "approval_status": "Pending Approval",
+            "production_status": "Not Started", "dispatch_status": "Pending",
+            "delivery_status": "Pending", "invoice_status": "Pending",
+            "outstanding_amount": subtotal + gst,
+            "sales_owner": l.get("assigned_to") or user["name"],
+            "priority": "Normal",
+            "source_lead_id": l["lead_id"],
+            "history": [{"event": f"Order created from lead {l['lead_id']}", "by": user["name"], "at": now()}],
+            "created_at": now(),
+        }
+        await db.orders.insert_one(order)
+        await notify(["design", "sales"], order["order_id"], f"New order from converted lead {l['company_name']}")
+    return {"client": clean(client), "order": clean(order) if order else None}
+
 # ---------- emails ----------
 class EmailSend(BaseModel):
     order_id: str
@@ -1508,6 +1681,14 @@ async def seed():
     ]
     for c in demo_clients:
         await db.clients.update_one({"client_id": c["client_id"]}, {"$setOnInsert": c}, upsert=True)
+    if await db.leads.count_documents({}) == 0:
+        demo_leads = [
+            {"lead_id": "LD-1001", "company_name": "Zenith Cafe Co.", "contact_person": "Aarav Mehta", "email": "aarav@zenithcafe.example", "phone": "+91 98212 33440", "source": "Referral", "status": "Qualified", "estimated_value": 350000, "product_interest": "Custom coffee bag printing", "assigned_to": "Riya Shah", "next_follow_up": "2026-02-20", "notes": "Chain of 12 cafes, wants sustainable packaging", "activities": [{"type": "call", "summary": "Intro call — very interested", "by": "Riya Shah", "at": now()}, {"type": "status_change", "summary": "Moved from Contacted to Qualified", "by": "Riya Shah", "at": now()}], "created_by": "Riya Shah", "created_at": now()},
+            {"lead_id": "LD-1002", "company_name": "Lumen Studios", "contact_person": "Sara Iyer", "email": "sara@lumen.example", "phone": "+91 90099 54123", "source": "Website", "status": "Proposal Sent", "estimated_value": 850000, "product_interest": "Retail store signage kit", "assigned_to": "Riya Shah", "next_follow_up": "2026-02-18", "notes": "Awaiting feedback on the ₹8.5L proposal", "activities": [{"type": "email", "summary": "Proposal V1 sent", "by": "Riya Shah", "at": now()}], "created_by": "Riya Shah", "created_at": now()},
+            {"lead_id": "LD-1003", "company_name": "Karvan Logistics", "contact_person": "Ishaan Verma", "email": "ishaan@karvan.example", "phone": "+91 98999 22014", "source": "Cold Call", "status": "Contacted", "estimated_value": 180000, "product_interest": "Corrugated shipper boxes (bulk)", "assigned_to": "Riya Shah", "next_follow_up": "2026-02-22", "notes": "Sent samples; awaiting confirmation on volume", "activities": [{"type": "call", "summary": "Discovery call done", "by": "Riya Shah", "at": now()}], "created_by": "Riya Shah", "created_at": now()},
+            {"lead_id": "LD-1004", "company_name": "Bloom & Bean", "contact_person": "Nikhil Kapoor", "email": "nikhil@bloombean.example", "phone": "+91 87800 99127", "source": "LinkedIn", "status": "New", "estimated_value": 90000, "product_interest": "Menu folders + table tents", "assigned_to": "Riya Shah", "next_follow_up": "2026-02-19", "notes": "Fresh inquiry from LinkedIn ad", "activities": [{"type": "note", "summary": "Lead created", "by": "Riya Shah", "at": now()}], "created_by": "Riya Shah", "created_at": now()},
+        ]
+        await db.leads.insert_many(demo_leads)
     if await db.orders.count_documents({}) == 0:
         clients_map = {c["client_id"]: c["company_name"] async for c in db.clients.find({}, {"_id": 0})}
         for i, o in enumerate(SEED_ORDERS):

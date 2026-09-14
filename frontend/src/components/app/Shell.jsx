@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { Bell, ChevronRight, ClipboardList, CreditCard, FileText, LayoutDashboard, LogOut, Menu, PackageCheck, Search, Settings as Cog, Truck, Users, X, BarChart3, ShieldCheck, ContactRound, Palette, CheckCircle2, Factory, Send } from "lucide-react";
+import { Bell, ChevronRight, ClipboardList, CreditCard, FileText, LayoutDashboard, LogOut, Menu, PackageCheck, Search, Settings as Cog, Truck, Users, X, BarChart3, ShieldCheck, ContactRound, Palette, CheckCircle2, Factory, Send, Sparkles } from "lucide-react";
 import { api } from "../../lib/api";
 import { testid } from "../../lib/format";
 
 const NAV = [
   { label: "Dashboard", icon: LayoutDashboard },
+  { label: "Leads", icon: Sparkles },
   { label: "Clients", icon: Users },
   { label: "Contacts", icon: ContactRound },
   { label: "Orders", icon: ClipboardList },
