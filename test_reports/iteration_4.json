@@ -1,0 +1,34 @@
+{
+  "summary": "Backend-only full lifecycle testing of Pinaki Solutions CRM. Wrote a comprehensive pytest suite (test_lifecycle.py) covering auth (login/me/logout/lockout, wrong password), clients (list/create/detail), orders CRUD with auto PS-YYMM-XX ID and 18% GST, full lifecycle enforcement (production locked before approval 409, dispatch locked before production 409, invoice locked before delivery 409), design->approval flow (rejection returns to Design, approval moves to Production), production status transitions (In Progress, Completed -> Dispatch), dispatch auto-creating CH-YYMM-XX challan and setting In Transit, delivery -> Accounts stage, INV-YYMM-XX invoice generation, partial + full payment updating invoice status/outstanding, GridFS document upload/list/download, notifications for design/production/accounts roles, global /api/search, /api/reports, and RBAC (sales blocked from production 403, production blocked from dispatch 403, accounts can post invoice after delivery). Result: 31/32 tests PASS. Only failure is a seed data gap (CL-1003 Svelte Interiors missing from db.clients — likely deleted by prior test iterations; seed runs only when collection empty).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "startup seed", "issue": "Seed inserts clients only when db.clients is empty. Prior sessions removed CL-1003 (Svelte Interiors) so it is no longer restored on restart. Consider upsert-by-client_id for demo clients so the three seeded companies always exist."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_lifecycle.py",
+    "/app/test_reports/pytest/pytest_lifecycle.xml"
+  ],
+  "action_items": [
+    "Re-seed CL-1003 Svelte Interiors client (either manually or by making startup seed idempotent per client_id).",
+    "Note: Tests must be executed with -p no:xdist (or serially) because the module-scoped order_flow fixture carries state across ordered tests; pytest-xdist splits classes across workers and breaks the flow. Consider adding `-p no:xdist` to backend/pytest.ini addopts for reliable lifecycle test runs."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 763 lines in a single file — split into routers (auth, orders, lifecycle, invoices, documents, reports) for maintainability.",
+    "create_delivery accepts admin/dispatch/accounts. Aligned with spec but be aware sales cannot mark delivery.",
+    "dashboard/reports do full-collection scans with in-Python aggregation — fine at seed scale but will not scale; move to Mongo aggregation pipelines.",
+    "invoice list computes status per request; consider caching or an aggregate view for large data.",
+    "download_document reads full file into memory (data = await stream.read()) — for large files stream chunks instead.",
+    "Startup seed uses count == 0 gate; changes to seed structure won't apply to existing deployments (as evidenced by missing Svelte)."
+  ],
+  "updated_files": ["/app/backend/tests/test_lifecycle.py"],
+  "success_rate": {"backend": "97% (31/32)", "frontend": "N/A"},
+  "test_credentials": "Seven roles seeded, all password Pinaki@123 (see /app/memory/test_credentials.md). Verified: admin, sales, design, production, dispatch, accounts.",
+  "seed_data_creation": "Test suite creates TEST_-prefixed clients and orders; no cleanup performed (safe because names/IDs are unique and namespaced).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run backend tests with: pytest /app/backend/tests/test_lifecycle.py -v -p no:xdist. All 32 lifecycle tests should pass once CL-1003 (Svelte Interiors) is re-seeded. Auth uses httpOnly cookies (secure+samesite=none) — use requests.Session for cookie persistence. CORS uses allow_origin_regex, credentials work. Login lockout after 5 failures / 15 min; clear via db.login_attempts.delete_many({}).",
+  "rca of the issue": "Missing Svelte Interiors client (CL-1003): startup seed only inserts clients when db.clients.count_documents({}) == 0. In a previous iteration the client was likely removed by cleanup or manual deletion; the seed no longer re-adds it because the collection is not empty. Fix: use upsert-per-client_id in seed loop so idempotent restarts restore the three demo clients."
+}

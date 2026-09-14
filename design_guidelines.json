@@ -1,0 +1,62 @@
+{
+  "app_name": "Pinaki Solutions Order Lifecycle CRM & OMS",
+  "app_type": "hybrid_fullstack",
+  "theme": "light",
+  "typography": {
+    "heading_font": "Plus Jakarta Sans, sans-serif",
+    "body_font": "Inter, sans-serif",
+    "mono_font": "JetBrains Mono, monospace"
+  },
+  "colors": {
+    "primary": "#0F172A",
+    "primary_hover": "#1E293B",
+    "accent": "#2563EB",
+    "accent_hover": "#1D4ED8",
+    "background": "#F8FAFC",
+    "surface": "#FFFFFF",
+    "card_bg": "#FFFFFF",
+    "border": "#E2E8F0",
+    "text_main": "#0F172A",
+    "text_muted": "#64748B",
+    "success": "#16A34A",
+    "warning": "#CA8A04",
+    "danger": "#DC2626",
+    "info": "#0284C7"
+  },
+  "visual_enhancers": {
+    "border_radius": "0.5rem",
+    "shadows": {
+      "sm": "0 1px 2px 0 rgb(0 0 0 / 0.05)",
+      "md": "0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)",
+      "lg": "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)"
+    },
+    "glassmorphism": "backdrop-blur-xl bg-white/85 border border-slate-200/80"
+  },
+  "layouts": {
+    "navigation": "left-sidebar with collapsible modules",
+    "grid_system": "Bento and high-density operational data tables with sticky header actions",
+    "spacing": "Generous Tailwind scale (p-6, p-8, gap-6)"
+  },
+  "component_path": "/app/frontend/src/components",
+  "image_urls": [
+    {
+      "category": "hero_workspace",
+      "url": "https://images.unsplash.com/photo-1758630737900-a28682c5aa69?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MjJ8MHwxfHNlYXJjaHwxfHxjb3Jwb3JhdGUlMjBvZmZpY2UlMjBpbnRlcmlvciUyMGIyYiUyMHdvcmtmbG93fGVufDB8fHx8MTc4OTM3MTIxNnww&ixlib=rb-4.1.0&q=85",
+      "description": "Corporate office interior showing B2B workflow environment"
+    },
+    {
+      "category": "client_portal",
+      "url": "https://images.unsplash.com/photo-1767331290386-de84a43d7c49?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MjJ8MHwxfHNlYXJjaHwyfHxjb3Jwb3JhdGUlMjBvZmZpY2UlMjBpbnRlcmlvciUyMGIyYiUyMHdvcmtmbG93fGVufDB8fHx8MTc4OTM3MTIxNnww&ixlib=rb-4.1.0&q=85",
+      "description": "Modern corporate lobby representing client engagement"
+    }
+  ],
+  "instructions_to_main_agent": "Build a robust, fully integrated B2B CRM and Order Management System for Pinaki Solutions covering the exact 10 lifecycle stages: 1. Order Received, 2. Design, 3. Client Approval, 4. Production, 5. Dispatch, 6. Challan, 7. Delivery, 8. Accounts, 9. Invoice, 10. Payment. Ensure JWT email/password login with seeded role users (Admin, Sales, Designer, Production Manager, Dispatcher, Accounts, Client), persistent object storage/demo file uploads, interactive order detail timeline with strict stage transition rules, document management (Challans, Invoices, Proof of Delivery), analytics dashboard with metrics and charts, search/filtering, and complete CRUD operations. Every interactive element must include data-testid attributes.",
+  "universal_guidelines_for_main_agent": [
+    "DO NOT use complete transparent background in headers or overlays.",
+    "Use sonner for toasts.",
+    "All interactive elements must include data-testid attributes.",
+    "Ensure high contrast and accessible text colors on hover/focus.",
+    "Use 2-3x more spacing for professional B2B cleanliness.",
+    "Never use generic AI assistant emojis for icons."
+  ]
+}

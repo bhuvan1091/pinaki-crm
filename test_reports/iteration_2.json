@@ -1,0 +1,49 @@
+{
+  "summary": "Completed iteration 2 regression testing for Pinaki CRM. Backend passed 12/13 tests, production build passed, and mobile/desktop UI smoke coverage passed for login, dashboard, module navigation, order search, and lifecycle detail.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "/api/auth/login (CORS)",
+        "issue": "The configured preview origin receives Access-Control-Allow-Origin for the canonical cluster-2 preview origin rather than the configured public app origin. Browser UI still works, but the regression assertion for explicit configured-origin echo fails.",
+        "priority": "MEDIUM"
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "New order",
+        "issue": "The Dashboard and Orders '+ New order' buttons only navigate to the Orders register; no order creation form or POST /api/orders workflow is exposed in the UI.",
+        "affected_selectors": ["[data-testid=\"new-order-button\"]", "[data-testid=\"orders-new-button\"]"]
+      }
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_crm_api.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Add a real new-order form connected to POST /api/orders, including client selection and required delivery data.",
+    "Confirm ingress/CORS behavior so the configured public origin is returned explicitly, or update environment/origin configuration to the canonical preview hostname."
+  ],
+  "critical_code_review_comments": [
+    "The UI currently has no create-order workflow despite exposing New order controls; this leaves a core CRM operation unavailable.",
+    "Module navigation pages are connected summary placeholders rather than operational Clients, Design, Production, Dispatch, Challans, Delivery, Accounts, Invoice, and Payment views."
+  ],
+  "updated_files": [
+    "/app/test_reports/iteration_2.json",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "success_rate": {
+    "backend": "92% (12/13)",
+    "frontend": "100% for executed smoke flows"
+  },
+  "seed_data_creation": "No new seed records created. Existing document upload test creates a TEST_lifecycle.txt GridFS record and existing lifecycle tests reset the seeded approval order.",
+  "retest_needed": true,
+  "should_call_test_agent_after_fix": true,
+  "context_for_next_testing_agent": "All requested auth roles, lockout, session cookies, dashboard, order detail, lifecycle guards, GridFS upload, mobile menu, role handoff restrictions, and production build were exercised. Admin is intentionally locked for 15 minutes after the lockout test; use sales credentials for UI retesting. New-order creation remains untested/unavailable because no form exists.",
+  "rca of the issue": "The New order buttons call onOpen(\"Orders\") and the App renders the existing Orders list for that page; there is no modal/form component or POST /orders invocation. The CORS mismatch appears at the preview ingress layer: OPTIONS and login responses canonicalize the origin to cluster-2.preview.emergentcf.cloud even when requests target pinaki-crm.preview.emergentagent.com."
+}

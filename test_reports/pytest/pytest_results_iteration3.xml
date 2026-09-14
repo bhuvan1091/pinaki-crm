@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="7" skipped="0" tests="13" time="3.654" timestamp="2026-09-14T07:51:34.958766+00:00" hostname="agent-env-2d1ecbda-ea17-462d-b7b9-58b6d7b5361b"><testcase classname="tests.test_crm_api" name="test_login_sets_session_and_me" time="0.224"><failure message="assert 429 == 200&#10; +  where 429 = &lt;Response [429]&gt;.status_code">backend/tests/test_crm_api.py:25: in test_login_sets_session_and_me
+    assert response.status_code == 200
+E   assert 429 == 200
+E    +  where 429 = &lt;Response [429]&gt;.status_code</failure></testcase><testcase classname="tests.test_crm_api" name="test_protected_endpoints_require_authentication" time="0.108" /><testcase classname="tests.test_crm_api" name="test_seeded_role_users_can_login[admin@pinakisolutions.com-admin]" time="0.118"><failure message="assert 429 == 200&#10; +  where 429 = &lt;Response [429]&gt;.status_code">backend/tests/test_crm_api.py:52: in test_seeded_role_users_can_login
+    assert response.status_code == 200
+E   assert 429 == 200
+E    +  where 429 = &lt;Response [429]&gt;.status_code</failure></testcase><testcase classname="tests.test_crm_api" name="test_seeded_role_users_can_login[sales@pinakisolutions.com-sales]" time="0.417" /><testcase classname="tests.test_crm_api" name="test_seeded_role_users_can_login[design@pinakisolutions.com-design]" time="0.428" /><testcase classname="tests.test_crm_api" name="test_seeded_role_users_can_login[production@pinakisolutions.com-production]" time="0.393" /><testcase classname="tests.test_crm_api" name="test_seeded_role_users_can_login[accounts@pinakisolutions.com-accounts]" time="0.460" /><testcase classname="tests.test_crm_api" name="test_dashboard_orders_and_detail_have_expected_data" time="0.106"><failure message="assert 429 == 200&#10; +  where 429 = &lt;Response [429]&gt;.status_code">backend/tests/test_crm_api.py:59: in test_dashboard_orders_and_detail_have_expected_data
+    assert response.status_code == 200
+E   assert 429 == 200
+E    +  where 429 = &lt;Response [429]&gt;.status_code</failure></testcase><testcase classname="tests.test_crm_api" name="test_lifecycle_guards_return_clear_conflicts" time="0.108"><failure message="assert 429 == 200&#10; +  where 429 = &lt;Response [429]&gt;.status_code">backend/tests/test_crm_api.py:77: in test_lifecycle_guards_return_clear_conflicts
+    assert response.status_code == 200
+E   assert 429 == 200
+E    +  where 429 = &lt;Response [429]&gt;.status_code</failure></testcase><testcase classname="tests.test_crm_api" name="test_document_upload_returns_persistent_linked_record" time="0.127"><failure message="assert 429 == 200&#10; +  where 429 = &lt;Response [429]&gt;.status_code">backend/tests/test_crm_api.py:102: in test_document_upload_returns_persistent_linked_record
+    assert response.status_code == 200
+E   assert 429 == 200
+E    +  where 429 = &lt;Response [429]&gt;.status_code</failure></testcase><testcase classname="tests.test_crm_api" name="test_non_sales_role_cannot_create_client" time="0.397" /><testcase classname="tests.test_crm_api" name="test_login_cors_and_cookie_security_attributes" time="0.118"><failure message="assert 429 == 200&#10; +  where 429 = &lt;Response [429]&gt;.status_code">backend/tests/test_crm_api.py:141: in test_login_cors_and_cookie_security_attributes
+    assert response.status_code == 200
+E   assert 429 == 200
+E    +  where 429 = &lt;Response [429]&gt;.status_code</failure></testcase><testcase classname="tests.test_crm_api" name="test_brute_force_lockout_after_five_failures" time="0.116"><failure message="assert 429 == 401&#10; +  where 429 = &lt;Response [429]&gt;.status_code">backend/tests/test_crm_api.py:157: in test_brute_force_lockout_after_five_failures
+    assert failed.status_code == 401
+E   assert 429 == 401
+E    +  where 429 = &lt;Response [429]&gt;.status_code</failure></testcase></testsuite></testsuites>
