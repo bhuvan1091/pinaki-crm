@@ -1321,6 +1321,70 @@ async def send_overdue_reminder(invoice, order, days_late):
     await add_history(order["order_id"], f"Auto reminder sent — {days_late} days overdue", "Automation")
     return True
 
+async def send_overdue_escalation(invoice, order, days_late):
+    if not os.environ.get("RESEND_API_KEY"):
+        return False
+    # gather internal recipients: sales owner + management + admins
+    recipients = set()
+    mgmt = await db.users.find({"role": {"$in": ["management", "admin"]}}, {"_id": 0, "email": 1}).to_list(50)
+    for u in mgmt:
+        if u.get("email"):
+            recipients.add(u["email"])
+    sales_owner_name = order.get("sales_owner")
+    if sales_owner_name:
+        sales_user = await db.users.find_one({"name": sales_owner_name}, {"_id": 0, "email": 1})
+        if sales_user and sales_user.get("email"):
+            recipients.add(sales_user["email"])
+    if not recipients:
+        return False
+    client = await db.clients.find_one({"client_id": invoice.get("client_id")}, {"_id": 0})
+    prior_reminders = [r for r in invoice.get("reminders_sent", []) if isinstance(r, int)]
+    reminder_line = f"Auto reminders already sent at {sorted(prior_reminders)} days late." if prior_reminders else "No auto reminders sent yet."
+    subject = f"ESCALATION · {invoice['invoice_number']} · {days_late} days overdue · {order.get('client_name')}"
+    body = (
+        f"Invoice {invoice['invoice_number']} for {order.get('client_name')} "
+        f"is now {days_late} days past its due date of {invoice['due_date']} and remains unpaid. "
+        f"{reminder_line} Please intervene directly.\n\n"
+        f"Client contact: {(client or {}).get('contact_person') or '—'} · {(client or {}).get('email') or '—'} · {(client or {}).get('phone') or '—'}\n"
+        f"Payment terms: {invoice.get('payment_terms', '—')}"
+    )
+    attachments = []
+    if invoice.get("pdf_document_id"):
+        d = await db.documents.find_one({"document_id": invoice["pdf_document_id"]}, {"_id": 0})
+        if d:
+            try:
+                stream = await gridfs.open_download_stream(ObjectId(d["storage_id"]))
+                content = await stream.read()
+                attachments.append({"filename": d["name"], "content": base64.b64encode(content).decode()})
+            except Exception:
+                pass
+    html = build_email_html("payment_reminder", order, body, "Pinaki Automation", invoice)
+    # inject a red escalation banner at the top of the HTML
+    html = html.replace(
+        "<div style='color:#fff;font-size:22px;font-weight:700;margin-top:4px;'>Order lifecycle update</div>",
+        f"<div style='background:#dc2626;color:#fff;display:inline-block;padding:4px 10px;border-radius:4px;font-size:10px;letter-spacing:1.4px;font-weight:800;margin-bottom:8px;'>INTERNAL ESCALATION · {days_late}D OVERDUE</div><div style='color:#fff;font-size:22px;font-weight:700;'>Payment escalation</div>",
+        1,
+    )
+    params = {"from": f"Pinaki Solutions <{SENDER_EMAIL}>", "to": sorted(recipients), "subject": subject, "html": html}
+    if attachments:
+        params["attachments"] = attachments
+    try:
+        result = await asyncio.to_thread(resend.Emails.send, params)
+    except Exception:
+        logging.exception("Escalation send failed")
+        return False
+    provider_id = result.get("id") if isinstance(result, dict) else getattr(result, "id", None)
+    await db.emails.insert_one({
+        "email_id": new_id("EM"), "order_id": order["order_id"], "client_name": order.get("client_name"),
+        "recipient": ", ".join(sorted(recipients)), "cc": [], "subject": subject, "template": "escalation",
+        "provider_id": provider_id, "document_ids": [invoice.get("pdf_document_id")] if invoice.get("pdf_document_id") else [],
+        "sent_by": "Automation", "created_at": now(), "auto": True, "days_late": days_late, "escalation": True,
+    })
+    await db.invoices.update_one({"invoice_id": invoice["invoice_id"]}, {"$addToSet": {"reminders_sent": "escalation_14"}})
+    await notify(["management", "sales", "accounts"], order["order_id"], f"Escalation sent — {invoice['invoice_number']} {days_late}d overdue")
+    await add_history(order["order_id"], f"Overdue escalation sent to sales + management ({days_late}d overdue)", "Automation")
+    return True
+
 async def check_overdue_reminders():
     invoices = await db.invoices.find({"status": {"$nin": ["Paid"]}}, {"_id": 0}).to_list(1000)
     payments = await db.payments.find({}, {"_id": 0}).to_list(2000)
@@ -1337,12 +1401,20 @@ async def check_overdue_reminders():
             continue
         days_late = (today_dt - due).days
         already = inv.get("reminders_sent", [])
+        if days_late <= 0:
+            continue
+        order = await db.orders.find_one({"order_id": inv["order_id"]}, {"_id": 0})
+        if not order:
+            continue
+        # 14+ day escalation to internal team
+        if days_late >= 14 and "escalation_14" not in already:
+            await send_overdue_escalation(inv, order, days_late)
+            continue
+        # 3 / 7 day client reminders
         for threshold in (3, 7):
             if days_late >= threshold and threshold not in already:
-                order = await db.orders.find_one({"order_id": inv["order_id"]}, {"_id": 0})
-                if order:
-                    await send_overdue_reminder(inv, order, days_late)
-                    break
+                await send_overdue_reminder(inv, order, days_late)
+                break
 
 async def reminder_loop():
     # small delay so it doesn't hammer during startup
