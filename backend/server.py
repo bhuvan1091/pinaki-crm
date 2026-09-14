@@ -1276,6 +1276,36 @@ async def public_approval_post(token: str, data: PublicApprovalDecision):
     await add_history(payload["order_id"], f"Client via link: {data.status}", data.approver, data.comments)
     return {"ok": True, "status": data.status}
 
+class InvoiceSnooze(BaseModel):
+    days: int = 7
+    promised_date: str = ""
+    note: str = ""
+
+@api.post("/invoices/{invoice_id}/snooze")
+async def snooze_invoice(invoice_id: str, data: InvoiceSnooze, user=Depends(require("admin", "accounts"))):
+    inv = await db.invoices.find_one({"invoice_id": invoice_id}, {"_id": 0})
+    if not inv: raise HTTPException(404, "Invoice not found")
+    if inv.get("status") == "Paid": raise HTTPException(409, "Invoice is already paid — nothing to snooze")
+    days = max(1, min(int(data.days or 7), 60))
+    until = (datetime.now(timezone.utc) + timedelta(days=days)).date().isoformat()
+    await db.invoices.update_one({"invoice_id": invoice_id}, {"$set": {
+        "snoozed_until": until,
+        "snooze_promised_date": data.promised_date or None,
+        "snooze_note": data.note,
+        "snoozed_by": user["name"],
+        "snoozed_at": now(),
+    }})
+    await add_history(inv["order_id"], f"Reminders snoozed until {until}" + (f" (client promised {data.promised_date})" if data.promised_date else ""), user["name"], data.note)
+    return {"ok": True, "snoozed_until": until}
+
+@api.post("/invoices/{invoice_id}/unsnooze")
+async def unsnooze_invoice(invoice_id: str, user=Depends(require("admin", "accounts"))):
+    inv = await db.invoices.find_one({"invoice_id": invoice_id}, {"_id": 0})
+    if not inv: raise HTTPException(404, "Invoice not found")
+    await db.invoices.update_one({"invoice_id": invoice_id}, {"$unset": {"snoozed_until": "", "snooze_promised_date": "", "snooze_note": "", "snoozed_by": "", "snoozed_at": ""}})
+    await add_history(inv["order_id"], "Reminder snooze cleared", user["name"])
+    return {"ok": True}
+
 # ---------- background: overdue reminders ----------
 async def send_overdue_reminder(invoice, order, days_late):
     if not os.environ.get("RESEND_API_KEY"):
@@ -1395,6 +1425,14 @@ async def check_overdue_reminders():
     for inv in invoices:
         if paid_map.get(inv["invoice_id"], 0) >= inv.get("total", 0):
             continue
+        # respect snooze
+        snoozed_until = inv.get("snoozed_until")
+        if snoozed_until:
+            try:
+                if datetime.fromisoformat(snoozed_until).date() >= today_dt:
+                    continue
+            except Exception:
+                pass
         try:
             due = datetime.fromisoformat(inv["due_date"]).date()
         except Exception:
