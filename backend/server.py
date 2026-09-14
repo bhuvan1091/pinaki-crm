@@ -67,14 +67,41 @@ def verify_approval_token(token):
         raise jwt.InvalidTokenError("Not an approval link")
     return payload
 
+def sign_pay_token(invoice_id):
+    return jwt.encode(
+        {"sub": invoice_id, "type": "pay_link", "exp": datetime.now(timezone.utc) + timedelta(days=90)},
+        secret(), algorithm=JWT_ALGORITHM,
+    )
+
+def verify_pay_token(token):
+    payload = jwt.decode(token, secret(), algorithms=[JWT_ALGORITHM])
+    if payload.get("type") != "pay_link":
+        raise jwt.InvalidTokenError("Not a payment link")
+    return payload
+
+BANK_DETAILS = {
+    "account_name": "Pinaki Solutions Pvt. Ltd.",
+    "bank_name": "HDFC Bank",
+    "account_number": "50200012345678",
+    "ifsc": "HDFC0001234",
+    "branch": "Mumbai — Fort",
+    "upi_id": "pinakisolutions@hdfc",
+    "swift": "HDFCINBB",
+}
+
 def rupees(n):
     return f"Rs. {float(n or 0):,.2f}"
 
 def generate_invoice_pdf(order, invoice, client):
+    return _render_document_pdf(order, client, "Tax Invoice", f"Invoice #: {invoice['invoice_number']}", f"Date: {invoice['invoice_date']}", extra_meta=[("PO Number", order.get("po_number") or "—"), ("Payment Terms", invoice.get("payment_terms", "")), ("Due Date", invoice.get("due_date", ""))], show_totals=True, invoice=invoice)
+
+def generate_challan_pdf(order, challan, client):
+    return _render_document_pdf(order, client, "Delivery Challan", f"Challan #: {challan['challan_number']}", f"Date: {challan['challan_date']}", extra_meta=[("Order ID", order.get("order_id", "")), ("PO Number", order.get("po_number") or "—"), ("Transporter", challan.get("transporter") or "—"), ("Tracking / LR", challan.get("tracking_number") or "—")], show_totals=False, quantity_override=challan.get("quantity"))
+
+def _render_document_pdf(order, client, title, ref_top, ref_bottom, extra_meta, show_totals, invoice=None, quantity_override=None):
     buf = BytesIO()
     c = pdfcanvas.Canvas(buf, pagesize=A4)
     W, H = A4
-    # header band
     c.setFillColor(colors.HexColor("#0f172a"))
     c.rect(0, H - 30 * mm, W, 30 * mm, stroke=0, fill=1)
     c.setFillColor(colors.HexColor("#93c5fd"))
@@ -82,17 +109,17 @@ def generate_invoice_pdf(order, invoice, client):
     c.drawString(20 * mm, H - 12 * mm, "PINAKI SOLUTIONS")
     c.setFillColor(colors.white)
     c.setFont("Helvetica-Bold", 22)
-    c.drawString(20 * mm, H - 22 * mm, "Tax Invoice")
+    c.drawString(20 * mm, H - 22 * mm, title)
     c.setFillColor(colors.HexColor("#cbd5e1"))
     c.setFont("Helvetica", 9)
-    c.drawRightString(W - 20 * mm, H - 16 * mm, f"Invoice #: {invoice['invoice_number']}")
-    c.drawRightString(W - 20 * mm, H - 22 * mm, f"Date: {invoice['invoice_date']}")
+    c.drawRightString(W - 20 * mm, H - 16 * mm, ref_top)
+    c.drawRightString(W - 20 * mm, H - 22 * mm, ref_bottom)
 
     y = H - 45 * mm
     c.setFillColor(colors.HexColor("#64748b"))
     c.setFont("Helvetica", 8)
-    c.drawString(20 * mm, y, "BILL FROM")
-    c.drawString(110 * mm, y, "BILL TO")
+    c.drawString(20 * mm, y, "FROM")
+    c.drawString(110 * mm, y, "TO")
     c.setFillColor(colors.HexColor("#0f172a"))
     c.setFont("Helvetica-Bold", 11)
     c.drawString(20 * mm, y - 6 * mm, "Pinaki Solutions Pvt. Ltd.")
@@ -102,24 +129,20 @@ def generate_invoice_pdf(order, invoice, client):
     c.drawString(20 * mm, y - 12 * mm, "info@ashokatechnovations.com")
     c.drawString(20 * mm, y - 17 * mm, "GSTIN: 27AAECP1234N1ZQ")
     if client:
-        c.drawString(110 * mm, y - 12 * mm, (client.get("billing_address") or "")[:60])
+        c.drawString(110 * mm, y - 12 * mm, (client.get("shipping_address") or client.get("billing_address") or "")[:60])
         c.drawString(110 * mm, y - 17 * mm, f"GSTIN: {client.get('gstin') or '—'}")
 
-    # order meta
     y = H - 75 * mm
-    for label, val in [("Order ID", order.get("order_id", "")),
-                       ("PO Number", order.get("po_number") or "—"),
-                       ("Payment Terms", invoice.get("payment_terms", "")),
-                       ("Due Date", invoice.get("due_date", ""))]:
+    for label, val in extra_meta:
         c.setFillColor(colors.HexColor("#94a3b8"))
         c.setFont("Helvetica", 8)
-        c.drawString(20 * mm, y, label.upper())
+        c.drawString(20 * mm, y, str(label).upper())
         c.setFillColor(colors.HexColor("#0f172a"))
         c.setFont("Helvetica-Bold", 10)
         c.drawString(20 * mm, y - 5 * mm, str(val))
         y -= 12 * mm
 
-    # line item table
+    # line item
     y = H - 130 * mm
     c.setFillColor(colors.HexColor("#0f172a"))
     c.rect(20 * mm, y, W - 40 * mm, 8 * mm, stroke=0, fill=1)
@@ -127,8 +150,11 @@ def generate_invoice_pdf(order, invoice, client):
     c.setFont("Helvetica-Bold", 9)
     c.drawString(23 * mm, y + 2.5 * mm, "DESCRIPTION")
     c.drawRightString(120 * mm, y + 2.5 * mm, "QTY")
-    c.drawRightString(150 * mm, y + 2.5 * mm, "RATE")
-    c.drawRightString(W - 23 * mm, y + 2.5 * mm, "AMOUNT")
+    if show_totals:
+        c.drawRightString(150 * mm, y + 2.5 * mm, "RATE")
+        c.drawRightString(W - 23 * mm, y + 2.5 * mm, "AMOUNT")
+    else:
+        c.drawRightString(W - 23 * mm, y + 2.5 * mm, "UOM")
 
     y -= 10 * mm
     c.setFillColor(colors.HexColor("#0f172a"))
@@ -139,28 +165,36 @@ def generate_invoice_pdf(order, invoice, client):
     c.drawString(23 * mm, y - 4 * mm, order.get("product_code") or "")
     c.setFillColor(colors.HexColor("#0f172a"))
     c.setFont("Helvetica", 10)
-    c.drawRightString(120 * mm, y, f"{order.get('quantity', 0):,}")
-    c.drawRightString(150 * mm, y, rupees(order.get("unit_price", 0)))
-    c.drawRightString(W - 23 * mm, y, rupees(order.get("order_value", 0)))
+    qty = quantity_override if quantity_override is not None else order.get("quantity", 0)
+    c.drawRightString(120 * mm, y, f"{qty:,}")
+    if show_totals:
+        c.drawRightString(150 * mm, y, rupees(order.get("unit_price", 0)))
+        c.drawRightString(W - 23 * mm, y, rupees(order.get("order_value", 0)))
+    else:
+        c.drawRightString(W - 23 * mm, y, "units")
 
-    # totals
-    y -= 25 * mm
-    for label, val, bold in [("Subtotal", order.get("order_value", 0), False),
-                             ("GST (18%)", order.get("gst", 0), False),
-                             ("TOTAL", invoice.get("total", 0), True)]:
-        c.setFillColor(colors.HexColor("#0f172a") if bold else colors.HexColor("#475569"))
-        c.setFont("Helvetica-Bold" if bold else "Helvetica", 11 if bold else 10)
-        c.drawRightString(150 * mm, y, label)
-        c.drawRightString(W - 23 * mm, y, rupees(val))
-        y -= 7 * mm
+    if show_totals and invoice:
+        y -= 25 * mm
+        for label, val, bold in [("Subtotal", order.get("order_value", 0), False),
+                                 ("GST (18%)", order.get("gst", 0), False),
+                                 ("TOTAL", invoice.get("total", 0), True)]:
+            c.setFillColor(colors.HexColor("#0f172a") if bold else colors.HexColor("#475569"))
+            c.setFont("Helvetica-Bold" if bold else "Helvetica", 11 if bold else 10)
+            c.drawRightString(150 * mm, y, label)
+            c.drawRightString(W - 23 * mm, y, rupees(val))
+            y -= 7 * mm
 
     # footer
     c.setStrokeColor(colors.HexColor("#e2e8f0"))
-    c.line(20 * mm, 30 * mm, W - 20 * mm, 30 * mm)
+    c.line(20 * mm, 32 * mm, W - 20 * mm, 32 * mm)
     c.setFillColor(colors.HexColor("#94a3b8"))
     c.setFont("Helvetica", 8)
-    c.drawString(20 * mm, 22 * mm, "Thank you for your business. Please make payment by the due date shown above.")
-    c.drawString(20 * mm, 17 * mm, "This is a computer-generated invoice and does not require a signature.")
+    if show_totals:
+        c.drawString(20 * mm, 24 * mm, "Thank you for your business. Please make payment by the due date shown above.")
+    else:
+        c.drawString(20 * mm, 24 * mm, "Please verify the goods against this challan. Report any discrepancy within 24 hours.")
+        c.drawString(20 * mm, 19 * mm, "Received in good condition. Signature: __________________________________")
+    c.drawString(20 * mm, 14 * mm, "This is a computer-generated document and does not require a signature.")
     c.showPage()
     c.save()
     return buf.getvalue()
@@ -605,6 +639,28 @@ async def create_dispatch(order_id: str, data: DispatchCreate, user=Depends(requ
         "tracking_number": data.tracking_number, "created_at": now(),
     }
     await db.challans.insert_one(challan)
+    # auto-generate challan PDF and attach as document
+    try:
+        client = await db.clients.find_one({"client_id": o["client_id"]}, {"_id": 0})
+        pdf_bytes = generate_challan_pdf(o, challan, client)
+        pdf_name = f"{challan_number}.pdf"
+        gridfs_id = await gridfs.upload_from_stream(f"{order_id}-{secrets.token_hex(3)}-{pdf_name}", pdf_bytes, metadata={"order_id": order_id, "content_type": "application/pdf"})
+        doc_record = {
+            "document_id": new_id("DOC"),
+            "order_id": order_id,
+            "name": pdf_name,
+            "category": "Challan",
+            "content_type": "application/pdf",
+            "storage_id": str(gridfs_id),
+            "storage_backend": "mongo-gridfs",
+            "uploaded_by": user["name"],
+            "created_at": now(),
+            "challan_id": challan["challan_id"],
+        }
+        await db.documents.insert_one(doc_record)
+        await db.challans.update_one({"challan_id": challan["challan_id"]}, {"$set": {"pdf_document_id": doc_record["document_id"]}})
+    except Exception:
+        logging.exception("Failed to generate challan PDF")
     await db.orders.update_one({"order_id": order_id}, {"$set": {
         "current_stage": "Delivery", "dispatch_status": "Dispatched",
         "delivery_status": "In Transit", "dispatch_date": data.dispatch_date,
@@ -856,7 +912,7 @@ class EmailSend(BaseModel):
     template: str = "generic"
     cc: List[EmailStr] = []
 
-def build_email_html(template_key, order, message, sender_name, invoice=None, approval_url=None):
+def build_email_html(template_key, order, message, sender_name, invoice=None, approval_url=None, pay_url=None):
     tpl = EMAIL_TEMPLATES.get(template_key, EMAIL_TEMPLATES["generic"])
     intro = tpl["intro"]
     rows = [
@@ -878,10 +934,17 @@ def build_email_html(template_key, order, message, sender_name, invoice=None, ap
     body = (message or intro).replace("\n", "<br>")
     cta_html = ""
     if approval_url:
-        cta_html = f"""
-        <tr><td align='center' style='padding:8px 28px 24px;'>
+        cta_html += f"""
+        <tr><td align='center' style='padding:8px 28px 8px;'>
           <a href='{approval_url}' style='display:inline-block;background:#2563eb;color:#fff;text-decoration:none;padding:14px 28px;border-radius:8px;font-weight:700;font-size:13px;letter-spacing:.3px;'>Review &amp; approve online</a>
-          <div style='color:#94a3b8;font-size:11px;margin-top:10px;'>One-click approve, request revision or reject.</div>
+          <div style='color:#94a3b8;font-size:11px;margin-top:8px;'>One-click approve, request revision or reject.</div>
+        </td></tr>
+        """
+    if pay_url:
+        cta_html += f"""
+        <tr><td align='center' style='padding:8px 28px 24px;'>
+          <a href='{pay_url}' style='display:inline-block;background:#16a34a;color:#fff;text-decoration:none;padding:14px 28px;border-radius:8px;font-weight:700;font-size:13px;letter-spacing:.3px;'>Pay online — view bank details</a>
+          <div style='color:#94a3b8;font-size:11px;margin-top:8px;'>Secure link with bank transfer &amp; UPI details.</div>
         </td></tr>
         """
     return f"""
@@ -920,10 +983,14 @@ async def send_email(data: EmailSend, request: Request, user=Depends(current_use
     if data.template in ("invoice", "payment_reminder"):
         invoice = await db.invoices.find_one({"order_id": data.order_id}, {"_id": 0})
     subject = data.subject or tpl["subject"].format(order_id=order.get("order_id"), invoice_number=(invoice or {}).get("invoice_number", ""))
-    # auto-attach invoice PDF for invoice/payment_reminder templates
+    # auto-attach relevant PDFs
     doc_ids = list(data.document_ids)
     if data.template in ("invoice", "payment_reminder") and invoice and invoice.get("pdf_document_id") and invoice["pdf_document_id"] not in doc_ids:
         doc_ids.append(invoice["pdf_document_id"])
+    if data.template == "challan":
+        challan = await db.challans.find_one({"order_id": data.order_id}, {"_id": 0}, sort=[("created_at", -1)])
+        if challan and challan.get("pdf_document_id") and challan["pdf_document_id"] not in doc_ids:
+            doc_ids.append(challan["pdf_document_id"])
     attachments = []
     for doc_id in doc_ids:
         d = await db.documents.find_one({"document_id": doc_id}, {"_id": 0})
@@ -942,7 +1009,11 @@ async def send_email(data: EmailSend, request: Request, user=Depends(current_use
         if latest_design:
             token = sign_approval_token(latest_design["design_id"], data.order_id)
             approval_url = f"{frontend_url(request)}/approve/{token}"
-    html = build_email_html(data.template, order, data.message, user["name"], invoice, approval_url)
+    # embed pay link for invoice/reminder
+    pay_url = None
+    if data.template in ("invoice", "payment_reminder") and invoice:
+        pay_url = f"{frontend_url(request)}/pay/{sign_pay_token(invoice['invoice_id'])}"
+    html = build_email_html(data.template, order, data.message, user["name"], invoice, approval_url, pay_url)
     params = {
         "from": f"Pinaki Solutions <{SENDER_EMAIL}>",
         "to": [data.recipient],
@@ -987,6 +1058,165 @@ async def all_emails(user=Depends(current_user)):
 @api.get("/emails/config")
 async def email_config(user=Depends(current_user)):
     return {"configured": bool(os.environ.get("RESEND_API_KEY")), "sender": SENDER_EMAIL}
+
+# ---------- public payment page ----------
+@api.get("/public/pay/{token}")
+async def public_pay(token: str):
+    try:
+        payload = verify_pay_token(token)
+    except jwt.PyJWTError:
+        raise HTTPException(400, "This payment link is invalid or has expired")
+    inv = await db.invoices.find_one({"invoice_id": payload["sub"]}, {"_id": 0})
+    if not inv:
+        raise HTTPException(404, "Invoice not found")
+    order = await db.orders.find_one({"order_id": inv["order_id"]}, {"_id": 0})
+    payments = await db.payments.find({"invoice_id": inv["invoice_id"]}, {"_id": 0}).to_list(100)
+    paid = sum(p.get("amount", 0) for p in payments)
+    outstanding = max(0, inv.get("total", 0) - paid)
+    return {
+        "invoice": {k: inv.get(k) for k in ("invoice_number", "invoice_date", "due_date", "payment_terms", "total", "status", "pdf_document_id")},
+        "order": {k: (order or {}).get(k) for k in ("order_id", "client_name", "product", "quantity", "total_value", "po_number")},
+        "amount_paid": paid,
+        "outstanding": outstanding,
+        "bank_details": BANK_DETAILS,
+    }
+
+# ---------- weekly management digest ----------
+def ist_now():
+    return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+
+async def build_digest():
+    orders = await db.orders.find({}, {"_id": 0}).to_list(2000)
+    invoices = await db.invoices.find({}, {"_id": 0}).to_list(2000)
+    payments = await db.payments.find({}, {"_id": 0}).to_list(3000)
+    paid_by_invoice = {}
+    for p in payments:
+        paid_by_invoice[p["invoice_id"]] = paid_by_invoice.get(p["invoice_id"], 0) + p.get("amount", 0)
+    outstanding = sum(max(0, i.get("total", 0) - paid_by_invoice.get(i["invoice_id"], 0)) for i in invoices)
+    today = ist_now().date()
+    overdue = 0
+    for i in invoices:
+        try:
+            due = datetime.fromisoformat(i.get("due_date", "1970-01-01")).date()
+        except Exception:
+            continue
+        if due < today and paid_by_invoice.get(i["invoice_id"], 0) < i.get("total", 0):
+            overdue += i.get("total", 0) - paid_by_invoice.get(i["invoice_id"], 0)
+    upcoming = []
+    for o in orders:
+        try:
+            due = datetime.fromisoformat(o.get("required_delivery_date", "1970-01-01")).date()
+        except Exception:
+            continue
+        if 0 <= (due - today).days <= 7 and o.get("delivery_status") != "Delivered":
+            upcoming.append(o)
+    pipeline = sum(o.get("total_value", 0) for o in orders if o.get("delivery_status") != "Delivered")
+    stage_counts = {s: sum(1 for o in orders if o.get("current_stage") == s) for s in STAGES}
+    return {
+        "pipeline": pipeline,
+        "outstanding": outstanding,
+        "overdue": overdue,
+        "upcoming": upcoming,
+        "stage_counts": stage_counts,
+        "delivered_this_week": sum(1 for o in orders if o.get("delivery_status") == "Delivered" and (o.get("delivery_date") or "") >= (today - timedelta(days=7)).isoformat()),
+        "new_this_week": sum(1 for o in orders if (o.get("order_date") or "") >= (today - timedelta(days=7)).isoformat()),
+    }
+
+def digest_html(d):
+    stages_html = "".join(f"<tr><td style='padding:6px 12px;color:#64748b;font-size:12px;'>{k}</td><td style='padding:6px 12px;color:#0f172a;font-size:13px;font-weight:600;text-align:right;'>{v}</td></tr>" for k, v in d["stage_counts"].items())
+    upcoming_html = "".join(f"<tr><td style='padding:6px 12px;font-size:12px;color:#0f172a;'>{o.get('order_id')}</td><td style='padding:6px 12px;font-size:12px;color:#334155;'>{o.get('client_name')}</td><td style='padding:6px 12px;font-size:12px;color:#334155;text-align:right;'>{o.get('required_delivery_date')}</td></tr>" for o in d["upcoming"][:10])
+    if not upcoming_html:
+        upcoming_html = "<tr><td colspan='3' style='padding:12px;color:#94a3b8;font-size:12px;text-align:center;'>Nothing due in the next 7 days.</td></tr>"
+    return f"""
+    <table width='100%' cellpadding='0' cellspacing='0' style='background:#f8fafc;padding:32px 0;font-family:Arial,sans-serif;'>
+      <tr><td align='center'>
+        <table width='620' cellpadding='0' cellspacing='0' style='background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 4px 12px rgba(15,23,42,.08);'>
+          <tr><td style='background:#0f172a;padding:24px 28px;'>
+            <div style='color:#93c5fd;font-size:11px;letter-spacing:2px;font-weight:700;'>PINAKI SOLUTIONS · WEEKLY DIGEST</div>
+            <div style='color:#fff;font-size:22px;font-weight:700;margin-top:4px;'>Monday morning briefing</div>
+            <div style='color:#cbd5e1;font-size:12px;margin-top:4px;'>{ist_now().strftime('%A, %d %b %Y')}</div>
+          </td></tr>
+          <tr><td style='padding:28px 28px 8px;'>
+            <table cellpadding='0' cellspacing='0' style='width:100%;'>
+              <tr>
+                <td style='padding:14px;background:#eff6ff;border-radius:8px;width:33%;'><div style='color:#2563eb;font-size:11px;font-weight:700;letter-spacing:1px;'>OPEN PIPELINE</div><div style='color:#0f172a;font-size:22px;font-weight:800;margin-top:6px;'>₹{d["pipeline"]:,.0f}</div></td>
+                <td style='width:12px;'></td>
+                <td style='padding:14px;background:#fffbeb;border-radius:8px;width:33%;'><div style='color:#a16207;font-size:11px;font-weight:700;letter-spacing:1px;'>OUTSTANDING</div><div style='color:#0f172a;font-size:22px;font-weight:800;margin-top:6px;'>₹{d["outstanding"]:,.0f}</div></td>
+                <td style='width:12px;'></td>
+                <td style='padding:14px;background:#fef2f2;border-radius:8px;width:33%;'><div style='color:#b91c1c;font-size:11px;font-weight:700;letter-spacing:1px;'>OVERDUE</div><div style='color:#0f172a;font-size:22px;font-weight:800;margin-top:6px;'>₹{d["overdue"]:,.0f}</div></td>
+              </tr>
+            </table>
+          </td></tr>
+          <tr><td style='padding:20px 28px 8px;'>
+            <div style='color:#0f172a;font-size:15px;font-weight:700;'>Due in the next 7 days</div>
+            <table cellpadding='0' cellspacing='0' style='width:100%;margin-top:12px;background:#f8fafc;border-radius:8px;overflow:hidden;'>
+              <tr><td style='padding:8px 12px;font-size:10px;color:#94a3b8;letter-spacing:1px;font-weight:700;'>ORDER</td><td style='padding:8px 12px;font-size:10px;color:#94a3b8;letter-spacing:1px;font-weight:700;'>CLIENT</td><td style='padding:8px 12px;font-size:10px;color:#94a3b8;letter-spacing:1px;text-align:right;font-weight:700;'>DELIVERY</td></tr>
+              {upcoming_html}
+            </table>
+          </td></tr>
+          <tr><td style='padding:20px 28px 8px;'>
+            <div style='color:#0f172a;font-size:15px;font-weight:700;'>Orders by stage</div>
+            <table cellpadding='0' cellspacing='0' style='width:100%;margin-top:12px;background:#f8fafc;border-radius:8px;overflow:hidden;'>
+              {stages_html}
+            </table>
+          </td></tr>
+          <tr><td style='padding:20px 28px 8px;color:#475569;font-size:13px;line-height:1.7;'>
+            <b>{d["new_this_week"]}</b> new orders and <b>{d["delivered_this_week"]}</b> deliveries closed in the last 7 days.
+          </td></tr>
+          <tr><td style='padding:14px 28px 26px;color:#94a3b8;font-size:11px;line-height:1.6;border-top:1px solid #e2e8f0;'>
+            Automated digest · Pinaki Solutions CRM
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+    """
+
+async def send_weekly_digest(force=False):
+    if not os.environ.get("RESEND_API_KEY"):
+        return False
+    now_ist = ist_now()
+    key = now_ist.strftime("%G-W%V")  # ISO week
+    state = await db.digest_state.find_one({"_id": "weekly"}) or {}
+    if not force and state.get("last_week") == key:
+        return False
+    users = await db.users.find({"role": {"$in": ["admin", "management"]}}, {"_id": 0, "email": 1, "name": 1}).to_list(100)
+    recipients = [u["email"] for u in users if u.get("email")]
+    if not recipients:
+        return False
+    data = await build_digest()
+    html = digest_html(data)
+    subject = f"Pinaki weekly briefing — pipeline ₹{data['pipeline']:,.0f}, overdue ₹{data['overdue']:,.0f}"
+    params = {"from": f"Pinaki Solutions <{SENDER_EMAIL}>", "to": recipients, "subject": subject, "html": html}
+    try:
+        result = await asyncio.to_thread(resend.Emails.send, params)
+    except Exception:
+        logging.exception("Weekly digest send failed")
+        return False
+    provider_id = result.get("id") if isinstance(result, dict) else getattr(result, "id", None)
+    await db.digest_state.update_one({"_id": "weekly"}, {"$set": {"last_week": key, "last_sent_at": now(), "recipients": recipients, "provider_id": provider_id}}, upsert=True)
+    logging.info(f"Weekly digest sent to {recipients} ({provider_id})")
+    return True
+
+async def digest_loop():
+    await asyncio.sleep(45)
+    while True:
+        try:
+            now_ist = ist_now()
+            # Monday between 09:00 and 09:59 IST
+            if now_ist.weekday() == 0 and 9 <= now_ist.hour < 10:
+                await send_weekly_digest()
+        except Exception:
+            logging.exception("digest loop error")
+        await asyncio.sleep(1800)  # every 30 minutes
+
+@api.post("/emails/run-digest")
+async def run_digest_now(user=Depends(require("admin", "management"))):
+    ok = await send_weekly_digest(force=True)
+    return {"ok": ok, "reason": None if ok else "RESEND_API_KEY missing or no recipients"}
+
+@api.get("/emails/digest-preview")
+async def digest_preview(user=Depends(require("admin", "management"))):
+    return await build_digest()
 
 # ---------- public approval link ----------
 class PublicApprovalDecision(BaseModel):
@@ -1071,7 +1301,7 @@ async def send_overdue_reminder(invoice, order, days_late):
                 attachments.append({"filename": d["name"], "content": base64.b64encode(content).decode()})
             except Exception:
                 pass
-    html = build_email_html("payment_reminder", order, body, "Pinaki Accounts", invoice)
+    html = build_email_html("payment_reminder", order, body, "Pinaki Accounts", invoice, pay_url=f"{os.environ.get('FRONTEND_URL', '')}/pay/{sign_pay_token(invoice['invoice_id'])}" if os.environ.get("FRONTEND_URL") else None)
     params = {"from": f"Pinaki Solutions <{SENDER_EMAIL}>", "to": [recipient], "subject": subject, "html": html}
     if attachments:
         params["attachments"] = attachments
@@ -1198,6 +1428,7 @@ async def seed():
                 await db.orders.update_one({"order_id": base["order_id"]}, {"$set": {"invoice_number": inv_no, "current_stage": "Payment"}})
     # start background reminder loop
     asyncio.create_task(reminder_loop())
+    asyncio.create_task(digest_loop())
 
 app.include_router(api)
 app.add_middleware(

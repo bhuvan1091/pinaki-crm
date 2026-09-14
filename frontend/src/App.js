@@ -15,11 +15,15 @@ import Reports from "./components/app/Reports";
 import UsersRoles from "./components/app/UsersRoles";
 import Settings from "./components/app/Settings";
 import ApprovalPage from "./components/app/ApprovalPage";
+import PayPage from "./components/app/PayPage";
 import "@/App.css";
 
 export default function App() {
-  const publicMatch = window.location.pathname.match(/^\/approve\/(.+)$/);
-  if (publicMatch) return (<><ApprovalPage token={publicMatch[1]} /><Toaster richColors position="top-right" /></>);
+  const path = window.location.pathname;
+  const approveMatch = path.match(/^\/approve\/(.+)$/);
+  if (approveMatch) return (<><ApprovalPage token={approveMatch[1]} /><Toaster richColors position="top-right" /></>);
+  const payMatch = path.match(/^\/pay\/(.+)$/);
+  if (payMatch) return (<><PayPage token={payMatch[1]} /><Toaster richColors position="top-right" /></>);
   return <AppInner />;
 }
 

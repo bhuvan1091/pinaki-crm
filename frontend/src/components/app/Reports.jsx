@@ -1,17 +1,32 @@
 import { useEffect, useState } from "react";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, CartesianGrid } from "recharts";
+import { Send } from "lucide-react";
+import { toast } from "sonner";
 import { api } from "../../lib/api";
 import { money, compactMoney } from "../../lib/format";
 
 export default function Reports() {
   const [r, setR] = useState(null);
+  const [sending, setSending] = useState(false);
   useEffect(() => { api("get", "/reports").then((r) => setR(r.data)); }, []);
   if (!r) return <div className="content"><div className="loading-screen">Loading reports…</div></div>;
+
+  const sendDigest = async () => {
+    setSending(true);
+    try {
+      const res = await api("post", "/emails/run-digest");
+      if (res.data.ok) toast.success("Weekly digest emailed to admin + management");
+      else toast.error(res.data.reason || "Digest could not be sent");
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Could not send digest");
+    } finally { setSending(false); }
+  };
 
   return (
     <div className="content">
       <div className="page-heading">
         <div><div className="small-label">INSIGHTS</div><h1>Management reports</h1><p className="muted">Volume, pipeline, cash & cycle times at a glance.</p></div>
+        <button className="outline-btn" data-testid="send-digest-button" onClick={sendDigest} disabled={sending}><Send size={14} /> {sending ? "Sending…" : "Send weekly digest now"}</button>
       </div>
       <div className="metrics-grid">
         <Kpi label="Order volume" value={r.order_volume} />

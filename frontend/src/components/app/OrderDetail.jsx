@@ -330,6 +330,13 @@ function DispatchTab({ order, call, busy, user, openEmail }) {
           <div><b>{d.transporter}</b><small>{d.dispatch_date} · {d.tracking_number || "no tracking"}</small></div>
         </div>
       ))}
+      {(order.challans || []).map((ch) => (
+        <div key={ch.challan_id} className="version-row" data-testid={`challan-row-${ch.challan_id}`}>
+          <div className="version-badge">{ch.challan_number}</div>
+          <div><b>{ch.quantity?.toLocaleString()} units</b><small>Challan · {ch.challan_date} · {ch.transporter || "—"}</small></div>
+          {ch.pdf_document_id && <a className="text-btn" href={downloadDocument(ch.pdf_document_id)} target="_blank" rel="noreferrer" data-testid={`challan-pdf-${ch.challan_id}`}><Download size={14} /> PDF</a>}
+        </div>
+      ))}
       {canAct && order.production_status === "Completed" && order.dispatch_status !== "Dispatched" && (
         <div className="stack top-gap">
           <div className="form-grid">
